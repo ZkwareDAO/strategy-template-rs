@@ -114,7 +114,7 @@ fn column_union(rows: &[FlatRow]) -> Vec<String> {
     cols
 }
 
-fn take_rows<'a>(rows: &'a [FlatRow], limit: usize) -> Vec<&'a FlatRow> {
+fn take_rows(rows: &[FlatRow], limit: usize) -> Vec<&FlatRow> {
     if limit == 0 {
         rows.iter().collect()
     } else {
