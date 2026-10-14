@@ -1,0 +1,33 @@
+[package]
+name = "strategy-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "strategy-rs"
+path = "src/main.rs"
+
+[dependencies]
+strategy-core = { workspace = true }
+strategy-signals = { workspace = true }
+strategy-store = { workspace = true }
+strategy-positions = { workspace = true }
+strategy-data = { workspace = true }
+strategy-broker = { workspace = true }
+strategy-strategies = { workspace = true }
+clap = { workspace = true }
+tokio = { workspace = true }
+chrono = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+dotenvy = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+plotters = { workspace = true }
+futures = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

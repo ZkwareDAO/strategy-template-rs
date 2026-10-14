@@ -1,0 +1,73 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/core",
+    "crates/signals",
+    "crates/positions",
+    "crates/data",
+    "crates/indicators",
+    "crates/broker",
+    "crates/strategies",
+    "crates/store",
+    "crates/app",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+# 内部 crate
+strategy-core = { path = "crates/core" }
+strategy-signals = { path = "crates/signals" }
+strategy-positions = { path = "crates/positions" }
+strategy-data = { path = "crates/data" }
+strategy-indicators = { path = "crates/indicators" }
+strategy-broker = { path = "crates/broker" }
+strategy-strategies = { path = "crates/strategies" }
+strategy-store = { path = "crates/store" }
+
+# 交易/指标（Phase 3-6 启用）
+# rsta = "0.1"
+# talib-rs = "0.1"
+# binance-sdk = "*"
+
+# 基础设施
+tokio = { version = "1", features = ["full"] }
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
+futures-util = "0.3"
+futures = { version = "0.3", default-features = false }
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+zip = { version = "2", default-features = false, features = ["deflate"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+csv = "1.3"
+chrono = { version = "0.4", features = ["serde"] }
+rust_decimal = { version = "1", features = ["serde-with-str"] }
+rust_decimal_macros = "1"
+sha2 = "0.10"
+hmac = "0.12"
+hex = "0.4"
+rand = "0.8"
+subtle = "2.6"
+dashmap = "6"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+clap = { version = "4", features = ["derive"] }
+thiserror = "2"
+anyhow = "1"
+dotenvy = "0.15"
+tempfile = "3"
+plotters = { version = "0.3", default-features = false, features = [
+    "bitmap_backend",
+    "bitmap_encoder",
+    "line_series",
+    "all_elements",
+    "ttf",
+    "fontconfig-dlopen",
+] }
+
+[profile.release]
+lto = "thin"

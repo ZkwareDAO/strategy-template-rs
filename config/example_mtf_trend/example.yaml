@@ -1,0 +1,19 @@
+# example_mtf_trend — 多周期教学策略配置样例
+# ============================================
+# 复制本文件为 config/example_mtf_trend/<SYMBOL>.yaml 即可跑。
+# 合并优先级（高 → 低）：CLI 显式参数 > 本文件 > 全局默认值
+strategy: example_mtf_trend   # 策略名（注册表键；必须等于 strategy_type()）
+timeframe: 4h                  # 触发主周期（1m/4h/1d 由策略 timeframes() 声明）
+cash: 200.0                    # 每单名义金额（USDT）
+leverage: 1
+exchange: binance
+account: example_account
+mode: paper_trading            # live / paper_trading / smoking
+warmup_days: 60                # 多周期需更长预热（1d EMA50）
+
+params:
+  fast_period: 10              # 4h 快线 EMA
+  slow_period: 30              # 4h 慢线 EMA
+  trend_ema_period: 50         # 1d 趋势 EMA
+  atr_period: 14               # 4h ATR
+  atr_stop_mult: 2.0           # 初始止损 = 2 × ATR

@@ -1,0 +1,31 @@
+strategy_name: example_mtf_trend
+rust_module: example_mtf_trend
+prefix: EXAMPLEMTFTREND
+direction: neutral
+timeframes: [4h]
+extra_timeframes: [1d]
+symbols: [BTCUSDT]
+
+entry:
+  description: "1d 趋势过滤 + 4h 均线交叉触发"
+  conditions:
+    - "1d：收盘价 > EMA(trend_ema_period) 允许做多"
+    - "1d：收盘价 < EMA(trend_ema_period) 允许做空"
+    - "4h：EMA(fast_period) 上穿 EMA(slow_period) → 开多"
+    - "4h：EMA(fast_period) 下穿 EMA(slow_period) → 开空"
+
+exit:
+  stop_loss: "入场价 ± atr_stop_mult × ATR(atr_period, 4h)"
+  trailing_stop: ""
+  signal_reversal: "4h 快慢 EMA 反向交叉 → 平仓"
+  note: ""
+
+default_params:
+  fast_period: 10
+  slow_period: 30
+  trend_ema_period: 50
+  atr_period: 14
+  atr_stop_mult: 2.0
+
+config_files:
+  - config/example_mtf_trend/example.yaml

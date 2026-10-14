@@ -1,0 +1,12 @@
+[package]
+name = "strategy-indicators"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+talib-rs = "0.1"
+
+[dev-dependencies]
+approx = "0.5"
+serde_json = { workspace = true }

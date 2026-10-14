@@ -1,0 +1,2 @@
+# 格式化配置：随 rust-toolchain.toml 钉死的版本生效，保证跨机器/CI 一致
+edition = "2021"
