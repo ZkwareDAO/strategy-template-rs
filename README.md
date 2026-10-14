@@ -86,6 +86,19 @@ state/{YYYYMMDD}/
 - 回测报告：`backtest_result.json` / `backtest_report.txt` /
   `backtest_analysis_report.md` / `charts/*.png`
 
+> `state/{YYYYMMDD}/{model}.csv` 是**机器恢复格式**
+> （`id,deleted,created_at_ms,updated_at_ms,payload_json`），域数据
+> 嵌在转义 JSON 里，终端直读困难——用 `inspect` 子命令展开查看：
+>
+> ```bash
+> # 目录（该日全部 model）或单个 CSV；列≤12 横向表格，>12 纵向键值块
+> cargo run -p strategy-app -- inspect backtest_output/<run>/<SYMBOL>/engine/state/<YYYYMMDD>
+> # 其他形态：--json（JSONL）/ --out <dir>（导出扁平 CSV）/ --limit N（默认 50，0=全部）
+> ```
+>
+> 只读工具，不改动快照格式（恢复语义不受影响）。详见
+> [`docs/RUNBOOK.md`](docs/RUNBOOK.md) §2.2。
+
 ## 外部服务配置（run 必需）
 
 见 `config/_global.yaml` 的 `services:` 节与

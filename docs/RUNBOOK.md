@@ -7,7 +7,7 @@
 
 | 组件 | 形态 | 默认端点 |
 |---|---|---|
-| strategy-rs（本仓库） | 本地二进制 `strategy-rs`（backtest/run/download） | — |
+| strategy-rs（本仓库） | 本地二进制 `strategy-rs`（backtest/run/download/inspect） | — |
 | kline-service | 外部进程（REST 回填 + WS 实时） | 见 strategy.config.yaml services.kline |
 | trading-service | 外部进程（南向 WS 收策略；对交易所主动外连） | 南向 9100 |
 | xili-exchange | trading_service_rs 的交易所模拟二进制（REST 下单 + 账户事件 WS） | 9200 |
@@ -81,6 +81,36 @@ mode: paper_trading   # 本地撮合（BacktestOrderClient，产出仓位五件�
 ```
 
 **紧急熔断**：`services.trading.submit_enabled: false` 时**所有** live 也不发单。
+
+### 2.2 查看 state 快照（strategy-rs inspect）
+
+`state/{YYYYMMDD}/{model}.csv` 是机器恢复格式
+（`id,deleted,created_at_ms,updated_at_ms,payload_json`），域数据嵌在
+转义 JSON 里，终端直读困难。`inspect` 子命令**只读**展开 `payload_json`
+为扁平列（嵌套对象以点号拼键，至多 2 层），**不改动快照格式**——
+恢复语义（软删墓碑、跨日去重、schema-less 演进）不受影响。
+
+```bash
+# 目录 = 该日全部 model；单个 CSV = 只看一个 model
+cargo run -p strategy-app -- inspect {output_dir}/state/{YYYYMMDD}
+cargo run -p strategy-app -- inspect {output_dir}/state/{YYYYMMDD}/signal.csv
+
+# 输出形态
+--json         # JSONL（每行一条记录，null 为 JSON null）
+--out <dir>    # 导出扁平 CSV（{name}.flat.csv，Excel/pandas 可直接读）
+--limit <N>    # 行数限制（默认 50；0 = 全部）
+```
+
+展示规则：展开列数 ≤12 用横向对齐表格，>12 用纵向键值块（每行一个
+记录，含 `created_at`/`updated_at`，软删行标 `[deleted]`）；
+时间戳列格式化为 UTC `YYYY-MM-DD HH:MM:SS`。任意**扁平** CSV
+（如对外报表 `signals/{name}/signal.csv`）可原样直读。
+
+排障示例（核对某信号的意图与成交）：
+
+```bash
+cargo run -p strategy-app -- inspect {output_dir}/state/{YYYYMMDD}/signal.csv --limit 1
+```
 
 ## 3. 冒烟联调（不开完整策略，直验下单链路）
 
