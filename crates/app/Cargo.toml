@@ -26,6 +26,7 @@ dotenvy = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }
+csv = { workspace = true }
 plotters = { workspace = true }
 futures = { workspace = true }
 

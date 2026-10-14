@@ -120,6 +120,20 @@ enum Commands {
         #[arg(long, default_value = "./data/klines")]
         data_dir: PathBuf,
     },
+    /// 查看 state 快照 / 任意 CSV（payload_json 展开为可读表格）
+    Inspect {
+        /// state 目录（如 engine/state/20260825）或单个 CSV 文件
+        path: PathBuf,
+        /// 只打印前 N 行（默认 50；0 = 全部）
+        #[arg(long, default_value_t = 50)]
+        limit: usize,
+        /// JSONL 输出（每行一条记录，域字段平铺）
+        #[arg(long)]
+        json: bool,
+        /// 把扁平 CSV 写入该目录（每输入文件一个 {name}.flat.csv）
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
 }
 
 fn parse_date(s: &str) -> anyhow::Result<chrono::DateTime<chrono::Utc>> {
@@ -430,6 +444,48 @@ fn main() -> anyhow::Result<()> {
                     "{symbol} {interval}: 共 {total} 根 → {}",
                     csv_store::csv_path(&data_dir, &symbol, tf).display()
                 );
+            }
+            Ok(())
+        }
+        Commands::Inspect {
+            path,
+            limit,
+            json,
+            out,
+        } => {
+            let paths: Vec<PathBuf> = if path.is_dir() {
+                let mut v: Vec<_> = std::fs::read_dir(&path)?
+                    .filter_map(|e| e.ok())
+                    .map(|e| e.path())
+                    .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("csv"))
+                    .collect();
+                v.sort();
+                v
+            } else {
+                vec![path.clone()]
+            };
+            anyhow::ensure!(!paths.is_empty(), "无 CSV 文件: {:?}", path);
+            for p in &paths {
+                let rows = strategy_app::inspect::read_csv(p)?;
+                let name = p
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("csv");
+                if let Some(dir) = &out {
+                    std::fs::create_dir_all(dir)?;
+                    let stem = p
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("out");
+                    let out_path = dir.join(format!("{stem}.flat.csv"));
+                    strategy_app::inspect::write_flat_csv(&out_path, &rows)?;
+                    println!("已写出: {}", out_path.display());
+                } else if json {
+                    strategy_app::inspect::print_jsonl(&rows, limit);
+                } else {
+                    println!("══ {name} ══");
+                    strategy_app::inspect::print(&rows, limit);
+                }
             }
             Ok(())
         }
