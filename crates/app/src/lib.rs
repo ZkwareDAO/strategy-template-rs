@@ -11,6 +11,7 @@
 pub mod bootstrap;
 pub mod config;
 pub mod engine;
+pub mod inspect;
 pub mod order_router;
 pub mod report;
 pub mod report_charts;

@@ -1892,6 +1892,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "clap",
+ "csv",
  "dotenvy",
  "futures",
  "plotters",
