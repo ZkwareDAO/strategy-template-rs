@@ -1,0 +1,22 @@
+[package]
+name = "strategy-data"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+strategy-core = { workspace = true }
+chrono = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+csv = { workspace = true }
+tracing = { workspace = true }
+tokio = { workspace = true }
+tokio-tungstenite = { workspace = true }
+futures-util = { workspace = true }
+reqwest = { workspace = true }
+zip = { workspace = true }
+anyhow = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

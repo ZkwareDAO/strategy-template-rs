@@ -1,0 +1,45 @@
+# ============================================================
+# _global.yaml 模板（提交入库的是本文件；使用：cp _global.example.yaml _global.yaml）
+# ============================================================
+# config/_global.yaml 已 gitignore（放真实端点/密钥，禁止提交），
+# 复制本文件为 _global.yaml 后按本地环境修改端点与账户。
+#
+# 定位：目录模式（--config config）共享全局基线，只为 {strategy}/{SYMBOL}.yaml
+# 提供共享基线，不产生 symbol/runtime。合并优先级：
+#   per-symbol 文件 > _global.yaml > 内置默认（crates/app/src/config.rs）
+#
+# 单文件用法：也可把本文件内容复制为 strategy.config.yaml，
+# 配 --config strategy.config.yaml 使用（单文件模式同样自动回落本文件）。
+#
+# 密钥：strategy_secret 真实值禁止入库，用环境变量注入：
+#   STRATEGY_SECRET=$(cat /path/to/south.key) cargo run -- run --config config
+#
+# 结构（deny_unknown_fields：字段拼错启动即报错，以 config.rs 为唯一事实源）：
+# services:
+#   kline:                          # 行情服务（REST 回填 + WS 实时订阅）
+#     backfill_url: <URL>           # 历史 K线 REST 回填端点（缺数据时自动补齐）
+#     ws_url: <WS-URL>              # 实时 K线 WS 订阅端点
+#     reconnect_backoff_max_secs: <u64>   # 断线重连退避上限（秒）
+#   trading:                        # 交易服务（下单 / 回报 / 仓位）
+#     ws_url: <WS-URL>              # 交易服务 WS 端点（三通道：鉴权/事件/请求）
+#     request_timeout_ms: <u64>     # 请求超时（毫秒）
+#     submit_enabled: <bool>        # 下单总开关（false 本地拦截；与 mode=live 双保险）
+#     reconnect_backoff_max_secs: <u64>
+#     strategy_secret: <64hex>      # HMAC 密钥（占位；真实值走 STRATEGY_SECRET）
+#     exchange: <name>              # per-symbol 未配置 exchange 时的回落
+#     account: <name>               # per-symbol 未配置 account 时的回落
+#
+# 以下为填写示例（端点为占位，部署时替换为用户自己的服务地址）：
+services:
+  kline:
+    backfill_url: https://your-kline-service.example.com
+    ws_url: wss://your-kline-service.example.com/ws/klines
+    reconnect_backoff_max_secs: 120
+  trading:
+    ws_url: wss://trading.your-domain.example.com/ws
+    request_timeout_ms: 5000
+    submit_enabled: true                    # 与 mode=live 双保险
+    reconnect_backoff_max_secs: 120
+    strategy_secret: "REPLACE_WITH_LOCAL_SOUTH_KEY_64_HEX"
+    exchange: binance
+    account: your_account

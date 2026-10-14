@@ -1,0 +1,6 @@
+# 钉死工具链版本：fmt/clippy 规则随版本漂移会导致 CI 门禁无因变红
+# （2026-10 曾因浮动 stable 产生 40 处 fmt diff）。升级版本时同步改
+# .github/workflows/ci.yml 的 toolchain 输入，并全量跑 fmt+clippy+test。
+[toolchain]
+channel = "1.98.1"
+components = ["rustfmt", "clippy"]

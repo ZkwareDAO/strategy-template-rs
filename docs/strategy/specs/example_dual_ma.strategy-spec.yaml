@@ -1,0 +1,27 @@
+strategy_name: example_dual_ma
+rust_module: example_dual_ma
+prefix: EXAMPLEDUALMA
+direction: neutral
+timeframes: [4h]
+symbols: [BTCUSDT]
+
+entry:
+  description: "4h 快慢 EMA 交叉开仓"
+  conditions:
+    - "4h：EMA(fast_period) 上穿 EMA(slow_period) → 开多"
+    - "4h：EMA(fast_period) 下穿 EMA(slow_period) → 开空"
+
+exit:
+  stop_loss: "入场价 ± stop_loss_pct%"
+  trailing_stop: ""
+  signal_reversal: "4h 快慢 EMA 反向交叉 → 平仓"
+  note: ""
+
+default_params:
+  fast_period: 10
+  slow_period: 30
+  stop_loss_pct: 2.0
+  exit_price_source: close
+
+config_files:
+  - config/example_dual_ma/example.yaml

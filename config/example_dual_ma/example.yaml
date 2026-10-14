@@ -1,0 +1,20 @@
+# example_dual_ma — 示例策略配置（模板样例，脱敏）
+# ============================================
+# 这是 example_dual_ma 示例策略的运行配置样例。真实部署请复制 config/_global.yaml
+# → strategy.config.yaml（已 gitignore，含密钥不入库）。
+#
+# 合并优先级（高 → 低）：CLI 显式参数 > 本文件 > 全局默认值
+strategy: example_dual_ma      # 策略名（注册表键；未知名字报错时列出可用列表）
+timeframe: 4h                  # 主周期（信号计算周期；1m 数据自动聚合）
+cash: 200.0                    # 每单名义金额（USDT）→ place_order 帧 order_cash；回测恒全仓
+leverage: 1                    # 杠杆 → place_order 帧 leverage
+exchange: binance              # 目标交易所实例名 → place_order 帧 exchange
+account: example_account       # 账户名 → place_order 帧 account
+mode: paper_trading            # run 模式：live（真单）/ paper_trading（本地撮合）/ smoking（骨架）
+warmup_days: 30                # 指标预热天数
+
+params:
+  fast_period: 10              # 快线 EMA 周期
+  slow_period: 30              # 慢线 EMA 周期
+  stop_loss_pct: 2.0           # 初始止损 %
+  exit_price_source: close     # close | high_low
