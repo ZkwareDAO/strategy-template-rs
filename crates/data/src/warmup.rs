@@ -56,17 +56,24 @@ pub fn merge_candles(local: &[Candle], remote: &[Candle], max_bars: usize) -> Ve
 ///
 /// 远程失败不致命：只用本地数据（比旧行为"远程失败 warn 后空预热"
 /// 多了本地兜底）。
+///
+/// **双角色注脚（§6.1）**：`symbol` 是裸挂牌代码（远程 `backfill` 请求帧
+/// 口径）；`venue_key` 是命名空间键（本地 CSV 路径口径）——同一根 K 线，
+/// 两个维度各司其职。
 pub async fn load_warmup(
     data_dir: &Path,
     client: &dyn KlineClient,
     symbol: &str,
+    venue_key: &str,
     warmup_bars: usize,
 ) -> (Vec<Candle>, WarmupStats) {
     debug!(
         symbol,
-        warmup_bars, "历史预热开始：本地 CSV 打底 + 远程回填补缺"
+        venue = venue_key,
+        warmup_bars,
+        "历史预热开始：本地 CSV 打底 + 远程回填补缺"
     );
-    let path = csv_store::csv_path(data_dir, symbol, Timeframe::M1);
+    let path = csv_store::resolve_csv_path(data_dir, venue_key, Timeframe::M1);
     let local = match csv_store::load_csv(&path) {
         Ok(v) => {
             debug!(symbol, n = v.len(), "本地 1m CSV 已读取");
@@ -220,12 +227,15 @@ mod tests {
         }
     }
 
+    /// 测试用命名空间键（§6.1）：路径维度；backfill 请求仍走裸 symbol
+    const VEN: &str = "binance/crypto_perpetual/BTCUSDT";
+
     #[tokio::test]
     async fn load_warmup_local_base_plus_remote_gap_persisted() {
         let dir = tempfile::tempdir().unwrap();
-        // 本地有 00:00..00:02 三根
+        // 本地有 00:00..00:02 三根（命名空间布局，§6.1）
         csv_store::save_csv(
-            csv_store::csv_path(dir.path(), "BTCUSDT", Timeframe::M1),
+            csv_store::csv_path(dir.path(), VEN, Timeframe::M1),
             &[bar(0, 10.0), bar(1, 11.0), bar(2, 12.0)],
         )
         .unwrap();
@@ -237,7 +247,7 @@ mod tests {
             last_bars: AtomicUsize::new(0),
         };
 
-        let (warm, stats) = load_warmup(dir.path(), &client, "BTCUSDT", 43200).await;
+        let (warm, stats) = load_warmup(dir.path(), &client, "BTCUSDT", VEN, 43200).await;
 
         assert!(client.called.load(Ordering::SeqCst));
         assert_eq!(
@@ -253,9 +263,9 @@ mod tests {
         assert_eq!(warm.len(), 5);
         assert_eq!(warm[2].close, 99.0, "重叠值用远程修正");
 
-        // CSV 已被追加到 5 根，且无重复时间戳
+        // CSV 已被追加到 5 根，且无重复时间戳（命名空间路径）
         let on_disk =
-            csv_store::load_csv(csv_store::csv_path(dir.path(), "BTCUSDT", Timeframe::M1)).unwrap();
+            csv_store::load_csv(csv_store::csv_path(dir.path(), VEN, Timeframe::M1)).unwrap();
         assert_eq!(on_disk.len(), 5);
         assert!(on_disk.windows(2).all(|w| w[0].open_time < w[1].open_time));
     }
@@ -264,7 +274,7 @@ mod tests {
     async fn load_warmup_remote_failure_falls_back_to_local() {
         let dir = tempfile::tempdir().unwrap();
         csv_store::save_csv(
-            csv_store::csv_path(dir.path(), "BTCUSDT", Timeframe::M1),
+            csv_store::csv_path(dir.path(), VEN, Timeframe::M1),
             &[bar(0, 10.0), bar(1, 11.0)],
         )
         .unwrap();
@@ -275,7 +285,7 @@ mod tests {
             last_bars: AtomicUsize::new(0),
         };
 
-        let (warm, stats) = load_warmup(dir.path(), &client, "BTCUSDT", 100).await;
+        let (warm, stats) = load_warmup(dir.path(), &client, "BTCUSDT", VEN, 100).await;
         assert!(!stats.remote_ok);
         assert_eq!(stats.local_bars, 2);
         assert_eq!(stats.total_bars, 2);
@@ -292,13 +302,13 @@ mod tests {
             called: AtomicBool::new(false),
             last_bars: AtomicUsize::new(0),
         };
-        let (warm, stats) = load_warmup(dir.path(), &client, "BTCUSDT", 100).await;
+        let (warm, stats) = load_warmup(dir.path(), &client, "BTCUSDT", VEN, 100).await;
         assert_eq!(stats.local_bars, 0);
         assert_eq!(stats.total_bars, 2);
         assert_eq!(stats.persisted_new, 2, "无本地文件时远程序列全部落盘");
         assert_eq!(warm.len(), 2);
         assert_eq!(
-            csv_store::load_csv(csv_store::csv_path(dir.path(), "BTCUSDT", Timeframe::M1))
+            csv_store::load_csv(csv_store::csv_path(dir.path(), VEN, Timeframe::M1))
                 .unwrap()
                 .len(),
             2

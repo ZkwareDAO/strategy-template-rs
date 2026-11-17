@@ -4,9 +4,14 @@
 //! - 市价单按 触发价±滑点 即时成交（buy 偏贵、sell 偏便宜 = 不利方向）
 //! - 反手 = 先平后开；平仓失败放弃开仓
 //! - 每次成交写 exchange_orders.csv（status=FILLED，合成订单号 bt_{signal_id}）
-//! - 手续费按名义金额比例计（fee_rate）
+//! - 未配置合约（crypto）：手续费按名义金额比例计（fee_rate），数量可小数
+//! - 配置合约（国内期货）：整数手、保证金占用、开/平/平今手续费、合约乘数
 
-use strategy_core::signal::{Action, Side};
+use chrono::{DateTime, NaiveDate, Utc};
+use strategy_core::contract::{ctp_trading_day, ContractSpec, FeeKind};
+use strategy_core::signal::Side;
+
+use crate::Action;
 
 use crate::order_log::{ExchangeOrderRecord, ExchangeOrderWriter, OrderStatus, PosType, SideCode};
 use crate::{AccountSnapshot, Broker};
@@ -15,15 +20,17 @@ use crate::{AccountSnapshot, Broker};
 pub struct BacktestConfig {
     /// 初始资金（quote 币）
     pub cash: f64,
-    /// 单边手续费率（0.0004 = 4bps）
+    /// 单边手续费率（0.0004 = 4bps；仅未配置合约的 crypto 模式生效）
     pub fee_rate: f64,
     /// 单边滑点比例
     pub slippage: f64,
-    /// 杠杆
+    /// 杠杆（名义敞口上限：crypto = 现金×杠杆；期货 = min(权益×杠杆, 保证金允许上限)）
     pub leverage: u32,
     /// 每单名义金额（strategy_cash）；**0 = 全仓**（每次开仓用全部可用现金×杠杆，
     /// 回测语义：不按 per-symbol cash 分仓，直接满仓进出）
     pub notional_per_order: f64,
+    /// 国内期货合约参数；None = crypto/兼容模式（小数数量 + fee_rate）
+    pub contract: Option<ContractSpec>,
     pub exchange: String,
     pub pos_type: PosType,
 }
@@ -36,6 +43,7 @@ impl Default for BacktestConfig {
             slippage: 0.0,
             leverage: 1,
             notional_per_order: 100.0,
+            contract: None,
             exchange: "binance".into(),
             pos_type: PosType::Futures,
         }
@@ -100,8 +108,11 @@ impl Broker for BacktestBroker {
 pub struct Position {
     pub side: Side,
     pub entry_price: f64,
+    /// 数量：合约模式 = 整数手数；crypto 模式 = 标的数量
     pub quantity: f64,
     pub signal_id: String,
+    /// 开仓时的 CTP 交易日（平今手续费判定；crypto 模式仅作记录）
+    pub open_trading_day: NaiveDate,
 }
 
 impl BacktestBroker {
@@ -186,8 +197,57 @@ impl BacktestBroker {
         side: Side,
         trigger: f64,
         side_code: SideCode,
-        t: chrono::DateTime<chrono::Utc>,
+        t: DateTime<Utc>,
     ) -> std::io::Result<Option<Fill>> {
+        let fp = self.fill_price(side_code, trigger);
+        if trigger <= 0.0 || fp <= 0.0 {
+            return Ok(None);
+        }
+
+        // 期货模式：整数手 + 保证金约束 + 合约手续费
+        if let Some(c) = self.config.contract.clone() {
+            let Some(lots) = c.sizing_lots(fp, self.cash, self.config.leverage) else {
+                let per_lot_margin = fp * c.multiplier * c.margin_rate;
+                tracing::warn!(
+                    symbol = %symbol_of(&self.strategy_name),
+                    cash = self.cash,
+                    price = fp,
+                    per_lot_margin,
+                    "保证金不足，放弃开仓（需要至少 {} 手）",
+                    c.min_lots.max(1)
+                );
+                return Ok(None);
+            };
+            let notional = fp * c.multiplier * lots as f64;
+            let fee = c.commission.fee(notional, lots as f64, FeeKind::Open);
+            self.cash -= fee;
+            self.position = Some(Position {
+                side,
+                entry_price: fp,
+                quantity: lots as f64,
+                signal_id: signal_id.into(),
+                open_trading_day: ctp_trading_day(t),
+            });
+            self.log_order(
+                signal_id,
+                side_code,
+                trigger,
+                fp,
+                lots as f64,
+                OrderStatus::Filled,
+                t,
+            )?;
+            return Ok(Some(Fill {
+                signal_id: signal_id.into(),
+                side: side_code,
+                fill_price: fp,
+                quantity: lots as f64,
+                fee,
+                pnl: 0.0,
+            }));
+        }
+
+        // crypto 兼容模式：维持原有全仓/每单名义金额语义
         let max_notional = self.cash.max(0.0) * self.config.leverage as f64;
         // notional_per_order <= 0 = 全仓模式（回测）：每次用全部可用现金×杠杆
         let notional = if self.config.notional_per_order <= 0.0 {
@@ -195,10 +255,9 @@ impl BacktestBroker {
         } else {
             self.config.notional_per_order.min(max_notional)
         };
-        if notional <= 0.0 || trigger <= 0.0 {
+        if notional <= 0.0 {
             return Ok(None);
         }
-        let fp = self.fill_price(side_code, trigger);
         let qty = notional / fp;
         let fee = notional * self.config.fee_rate;
         self.cash -= fee;
@@ -207,6 +266,7 @@ impl BacktestBroker {
             entry_price: fp,
             quantity: qty,
             signal_id: signal_id.into(),
+            open_trading_day: ctp_trading_day(t),
         });
 
         self.log_order(
@@ -234,14 +294,32 @@ impl BacktestBroker {
         signal_id: &str,
         trigger: f64,
         close_side: SideCode,
-        t: chrono::DateTime<chrono::Utc>,
+        t: DateTime<Utc>,
     ) -> std::io::Result<Fill> {
         let fp = self.fill_price(close_side, trigger);
-        let notional = pos.entry_price * pos.quantity; // 按开仓名义
-        let fee = notional * self.config.fee_rate;
-        let pnl = match pos.side {
-            Side::Long => (fp - pos.entry_price) * pos.quantity,
-            Side::Short => (pos.entry_price - fp) * pos.quantity,
+        let (fee, pnl) = if let Some(c) = self.config.contract.as_ref() {
+            // 期货：按平仓成交金额计费；同一 CTP 交易日平仓 = 平今
+            let notional = fp * c.multiplier * pos.quantity;
+            let close_today = pos.open_trading_day == ctp_trading_day(t);
+            let kind = if close_today {
+                FeeKind::CloseToday
+            } else {
+                FeeKind::Close
+            };
+            let fee = c.commission.fee(notional, pos.quantity, kind);
+            let diff = match pos.side {
+                Side::Long => fp - pos.entry_price,
+                Side::Short => pos.entry_price - fp,
+            };
+            (fee, diff * pos.quantity * c.multiplier)
+        } else {
+            let notional = pos.entry_price * pos.quantity; // 兼容口径：按开仓名义
+            let fee = notional * self.config.fee_rate;
+            let pnl = match pos.side {
+                Side::Long => (fp - pos.entry_price) * pos.quantity,
+                Side::Short => (pos.entry_price - fp) * pos.quantity,
+            };
+            (fee, pnl)
         };
         self.cash += pnl - fee;
 
@@ -438,5 +516,121 @@ mod tests {
         };
         let r = b.execute("sig_s", &open_long, t()).unwrap();
         assert!((r.fills[0].fill_price - 100.1).abs() < 1e-9); // 买贵
+    }
+
+    /// 期货合约：整数手、保证金约束、乘数盈亏、开/平/平今手续费
+    fn futures_cfg() -> BacktestConfig {
+        use strategy_core::contract::{CommissionSpec, FeeMode};
+        BacktestConfig {
+            cash: 10_000.0,
+            contract: Some(ContractSpec {
+                name: Some("测试期货".into()),
+                multiplier: 5.0,
+                tick_size: 1.0,
+                margin_rate: 0.1,
+                min_lots: 1,
+                session_opens: vec!["09:00".into(), "21:00".into()],
+                no_trade_after_open_minutes: 5,
+                session_closes: vec!["15:00".into(), "01:00".into()],
+                no_trade_before_close_minutes: 5,
+                commission: CommissionSpec {
+                    mode: FeeMode::Rate,
+                    open: 0.0001,
+                    close: 0.0001,
+                    close_today: Some(0.0002),
+                },
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn futures_open_is_integer_lots_and_charges_margin_aware_size() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut b = BacktestBroker::new(futures_cfg(), "x_CU_BT", dir.path());
+        let open = Action::Open {
+            side: Side::Long,
+            price: 100.0,
+            stop_price: 98.0,
+            atr: 1.0,
+            strength: 0.8,
+            reason: "r".into(),
+        };
+        let r = b.execute("sig_open", &open, t()).unwrap();
+        assert_eq!(r.fills.len(), 1);
+        // leverage=1：每手名义 100×5=500，10000 权益最多 20 手
+        assert_eq!(r.fills[0].quantity, 20.0);
+        assert!(r.fills[0].quantity.fract() == 0.0, "期货手数必须为整数");
+        // 开仓手续费 = 100×5×20 × 0.0001 = 1.0
+        assert!((r.fills[0].fee - 1.0).abs() < 1e-9);
+        assert!((b.cash - 9_999.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn futures_margin_binds_when_leverage_is_high() {
+        let mut cfg = futures_cfg();
+        cfg.leverage = 10;
+        let dir = tempfile::tempdir().unwrap();
+        let mut b = BacktestBroker::new(cfg, "x_CU_BT", dir.path());
+        let open = Action::Open {
+            side: Side::Long,
+            price: 100.0,
+            stop_price: 98.0,
+            atr: 1.0,
+            strength: 0.8,
+            reason: "r".into(),
+        };
+        let r = b.execute("sig_open", &open, t()).unwrap();
+        // 保证金上限：floor(10000 / (50 + 0.05)) = 199 手
+        assert_eq!(r.fills[0].quantity, 199.0);
+        assert!(r.fills[0].quantity.fract() == 0.0);
+    }
+
+    #[test]
+    fn futures_insufficient_margin_skips_open() {
+        let mut cfg = futures_cfg();
+        cfg.cash = 49.0; // 不够 1 手保证金（50）+ 手续费
+        let dir = tempfile::tempdir().unwrap();
+        let mut b = BacktestBroker::new(cfg, "x_CU_BT", dir.path());
+        let open = Action::Open {
+            side: Side::Long,
+            price: 100.0,
+            stop_price: 98.0,
+            atr: 1.0,
+            strength: 0.8,
+            reason: "r".into(),
+        };
+        let r = b.execute("sig_open", &open, t()).unwrap();
+        assert!(r.fills.is_empty());
+        assert!(b.position.is_none());
+        assert!((b.cash - 49.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn futures_pnl_uses_multiplier_and_close_today_fee() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut b = BacktestBroker::new(futures_cfg(), "x_CU_BT", dir.path());
+        let open = Action::Open {
+            side: Side::Long,
+            price: 100.0,
+            stop_price: 98.0,
+            atr: 1.0,
+            strength: 0.8,
+            reason: "r".into(),
+        };
+        let r = b.execute("sig_open", &open, t()).unwrap();
+        let lots = r.fills[0].quantity;
+        // 同日平仓 → 平今费率；盈亏 = (110-100)×5×手数
+        let close = Action::Close {
+            price: 110.0,
+            reason: "close".into(),
+            is_stop_loss: false,
+            strength: 0.8,
+        };
+        let r = b.execute("sig_close", &close, t()).unwrap();
+        let f = &r.fills[0];
+        assert!((f.pnl - 10.0 * 5.0 * lots).abs() < 1e-9);
+        let expected_fee = 110.0 * 5.0 * lots * 0.0002;
+        assert!((f.fee - expected_fee).abs() < 1e-9);
     }
 }

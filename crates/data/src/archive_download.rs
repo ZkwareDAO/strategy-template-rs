@@ -393,19 +393,22 @@ impl Downloader {
     }
 
     /// 下载 [start, end) 并 merge 进现有 CSV，返回落盘后全量根数。
+    /// `venue_key` = §6.1 命名空间键（落盘路径维度；`symbol` 仍为裸挂牌代码，
+    /// 请求帧口径）。
     pub async fn download_range(
         &self,
         symbol: &str,
+        venue_key: &str,
         tf: Timeframe,
         start: DateTime<Utc>,
         end: DateTime<Utc>,
         data_dir: &std::path::Path,
     ) -> anyhow::Result<usize> {
         anyhow::ensure!(end > start, "end 必须晚于 start");
-        let path = csv_store::csv_path(data_dir, symbol, tf);
+        let path = csv_store::resolve_csv_path(data_dir, venue_key, tf);
         let existing = csv_store::load_csv(&path)?;
         tracing::info!(
-            symbol, %tf, %start, %end,
+            symbol, venue = venue_key, %tf, %start, %end,
             existing = existing.len(),
             "开始下载（归档优先，fapi 兜底）"
         );
@@ -434,6 +437,7 @@ impl Downloader {
     pub async fn ensure_recent_history(
         &self,
         symbol: &str,
+        venue_key: &str,
         tf: Timeframe,
         days: i64,
         data_dir: &std::path::Path,
@@ -441,7 +445,7 @@ impl Downloader {
         let now = Utc::now();
         let target_start = now - ChronoDuration::days(days);
         let step = ChronoDuration::minutes(tf.0 as i64);
-        let path = csv_store::csv_path(data_dir, symbol, tf);
+        let path = csv_store::resolve_csv_path(data_dir, venue_key, tf);
 
         let existing = csv_store::load_csv(&path)?;
         let bounds = existing

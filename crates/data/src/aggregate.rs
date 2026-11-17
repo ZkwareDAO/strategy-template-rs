@@ -1,6 +1,6 @@
 //! 1m → 大周期聚合
 //!
-//! 对齐 Python `resample_ohlcv`（klines_loader.py:281）的语义：
+//! 对齐 Python `resample_ohlcv`（klines_loader.py:281）的语义： refcheck:ignore
 //! - 桶 = open_time 左闭区间（UTC 整点网格：1h 整分、1d 午夜）
 //! - open=first, high=max, low=min, close=last, volume=sum
 //! - `drop_partial_head`：源数据起点晚于首桶边界 → 首桶残缺，丢弃

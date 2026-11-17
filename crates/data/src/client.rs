@@ -1,8 +1,9 @@
 //! KlineClient 端口（设计文档 §3.1/§4.1）
 //!
 //! 数据层只认识本端口：历史回填 + 实时订阅。回测直接读 CSV（不经端口）；
-//! live 由 [`crate::remote_client::RemoteKlineServiceClient`] 对接
-//! kline-service（端点全部来自配置 services.kline）。
+//! live 实现是 `app/src/ts_kline.rs::TradingServiceKlineClient`——K 线经
+//! trading-service 连接的 `subscribe_kline` 推送（定稿 `kline_1m_batch`），
+//! 历史回填走 `get_klines`（契约见 contracts/trading-service.md §8.5）。
 
 use std::future::Future;
 use std::pin::Pin;
@@ -14,16 +15,17 @@ use tokio::sync::broadcast;
 pub type BackfillFuture<'a> =
     Pin<Box<dyn Future<Output = anyhow::Result<Vec<Candle>>> + Send + 'a>>;
 
-/// 实时订阅事件：闭合 K 线 / 未闭合快照 / 重连通知，同一条有序流。
+/// 实时订阅事件：闭合 K 线 / 重连通知，同一条有序流。
 ///
-/// 进程级一条 WS 由共享分发器按 symbol 扇出（每 symbol 一个 broadcast 通道）。
-/// receiver 消费落后超容量时 recv 返回 `RecvError::Lagged(n)`，调用方自愈
-/// （backfill 补缺）；慢 receiver 不影响其他 symbol（broadcast 语义）。
+/// 各策略类型的交易连接推送汇入进程级 broadcast，由共享 router 按 symbol
+/// 扇出（每 symbol 一个 broadcast 通道）。receiver 消费落后超容量时 recv
+/// 返回 `RecvError::Lagged(n)`，调用方自愈（backfill 补缺）；慢 receiver
+/// 不影响其他 symbol（broadcast 语义）。
 #[derive(Debug, Clone)]
 pub enum KlineEvent {
     /// 已闭合 K 线（驱动策略；落后时经 Lagged 自愈，不阻塞其他 symbol）
     Closed(KlineBar),
-    /// 未闭合快照（最新价；环形缓冲，最旧先出）
+    /// 未闭合快照（端口保留形：当前 live 路径只推定稿 bar，不产生此事件）
     Tick(KlineBar),
     /// 每次（重）连成功广播一次，调用方据此触发历史补缺
     Reconnected,

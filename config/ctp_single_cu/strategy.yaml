@@ -1,0 +1,29 @@
+# futures_single_trend — 期货 1:1 样例：一个策略实例只做 CU 一个标的。
+#
+# 1:1 形态不靠 rebalance 分流；universe 只有一行，引擎只建一个 slot/
+# 一个总仓/一个子仓。要同时跑多个品种各自独立，就复制目录并各改 universe。
+strategy_type: futures_single_trend
+strategy_id: futures_single_trend:cu
+
+universe:
+  - { symbol: CU, exchange: SHFE }
+
+# [0] = 决策周期（15m 触发）；1h 是趋势过滤，引擎从 1m 按交易时段聚合。
+timeframes: [15m, 1h]
+
+indicators: {}
+entry: { default: [] }
+exit: { default: [] }
+
+# 策略自带 ATR 硬止损；L3 组合止损只作最后兜底。
+portfolio_exit: { trailing: null, stop_loss_pct: 8 }
+
+risk: { max_total_notional: 1.0 }
+sizing: { per_position_pct: 1.0 }
+
+params:
+  trigger_ema: 60
+  trend_ema: 60
+  trend_tf: "1h"
+  atr_period: 14
+  atr_stop_mult: 2.0

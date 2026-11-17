@@ -1,4 +1,10 @@
-//! K 线 CSV 存取 — 布局镜像 Python `data/klines/{tf}/{SYMBOL}_{tf}.csv`
+//! K 线 CSV 存取 — 命名空间布局（§6.1，阶段 5c run 合并步）
+//!
+//! 布局：`{base}/{tf}/{exchange}/{market}/{SYMBOL}_{tf}.csv`——路径键 =
+//! `namespaced_key_of` 产出的 venue_key（`{exchange}/{market}/{symbol}`），
+//! 同名裸挂牌代码跨交易所不再共享文件（§14-3 CSV 面）。
+//! 传裸 symbol（无 `/`）回落旧布局 `{base}/{tf}/{SYMBOL}_{tf}.csv`，
+//! `resolve_csv_path` 对旧布局存量文件做**一次 rename 迁移**。
 //!
 //! 列（10）：timestamp,open,high,low,close,volume,quote_volume,trade_num,
 //! active_buy_volume,active_buy_quote_volume
@@ -14,12 +20,67 @@ use tracing::{debug, trace};
 
 use strategy_core::candle::{Candle, Timeframe};
 
-/// {base}/{tf}/{SYMBOL}_{tf}.csv（镜像 Python save_to_csv 的目录布局）
-pub fn csv_path(base: impl AsRef<Path>, symbol: &str, tf: Timeframe) -> PathBuf {
+/// venue_key 拆段：3 段 = exchange/market/symbol；2 段 = exchange/symbol；
+/// 无 `/` = 裸 symbol（回落旧布局，迁移期未升级的调用者零破坏）。
+fn split_venue_key(venue_key: &str) -> (Option<&str>, Option<&str>, &str) {
+    let mut segs = venue_key.rsplitn(3, '/');
+    match (segs.next(), segs.next(), segs.next()) {
+        (Some(sym), Some(mk), Some(ex)) => (Some(ex), Some(mk), sym),
+        (Some(sym), Some(ex), None) => (Some(ex), None, sym),
+        _ => (None, None, venue_key),
+    }
+}
+
+/// `{base}/{tf}/{exchange}/{market}/{SYMBOL}_{tf}.csv`（§6.1 命名空间布局）。
+/// `venue_key` = `namespaced_key_of(exchange, market, symbol)`；裸 symbol
+/// 输入退化为旧布局 `{base}/{tf}/{SYMBOL}_{tf}.csv`。
+pub fn csv_path(base: impl AsRef<Path>, venue_key: &str, tf: Timeframe) -> PathBuf {
+    let tf_str = tf.to_string();
+    let (exchange, market, symbol) = split_venue_key(venue_key);
+    let mut p = base.as_ref().join(&tf_str);
+    if let Some(ex) = exchange {
+        p = p.join(ex);
+    }
+    if let Some(mk) = market {
+        p = p.join(mk);
+    }
+    p.join(format!("{}_{}.csv", symbol.to_uppercase(), tf_str))
+}
+
+/// 旧（迁移前）布局：`{base}/{tf}/{SYMBOL}_{tf}.csv`——仅作迁移源与兼容钉。
+pub fn legacy_csv_path(base: impl AsRef<Path>, symbol: &str, tf: Timeframe) -> PathBuf {
     let tf_str = tf.to_string();
     base.as_ref()
         .join(&tf_str)
         .join(format!("{}_{}.csv", symbol.to_uppercase(), tf_str))
+}
+
+/// 取命名空间路径；若新路径不存在而旧布局文件存在，则**一次 rename 迁移**
+/// （零下载、零复制——「schema 一次迁完」在数据文件面的对应物）。
+pub fn resolve_csv_path(base: impl AsRef<Path>, venue_key: &str, tf: Timeframe) -> PathBuf {
+    let path = csv_path(&base, venue_key, tf);
+    if path.exists() {
+        return path;
+    }
+    let (_, _, symbol) = split_venue_key(venue_key);
+    let legacy = legacy_csv_path(&base, symbol, tf);
+    if legacy.exists() {
+        if let Some(dir) = path.parent() {
+            if let Err(e) = fs::create_dir_all(dir) {
+                debug!(path = %dir.display(), error = %e, "CSV 迁移：创建命名空间目录失败，沿用旧路径");
+                return legacy;
+            }
+        }
+        match fs::rename(&legacy, &path) {
+            Ok(()) => {
+                trace!(old = %legacy.display(), new = %path.display(), "CSV 迁移：存量文件已改名至命名空间布局")
+            }
+            Err(e) => {
+                debug!(old = %legacy.display(), error = %e, "CSV 迁移：rename 失败，本次沿用旧路径")
+            }
+        }
+    }
+    path
 }
 
 /// pandas 风格 UTC 时间戳：`2025-12-24 00:00:00+00:00`
@@ -128,13 +189,15 @@ fn fmt_f64(v: f64) -> String {
     }
 }
 
-/// 读取（或初始化）某 symbol 某周期的全部已闭合 K 线
+/// 读取（或初始化）某命名空间标的某周期的全部已闭合 K 线。
+/// `venue_key` 为 §6.1 命名空间键（裸 symbol 兼容旧布局；旧布局存量经
+/// `resolve_csv_path` 一次 rename 迁移）。
 pub fn load_or_empty(
     base: impl AsRef<Path>,
-    symbol: &str,
+    venue_key: &str,
     tf: Timeframe,
 ) -> io::Result<Vec<Candle>> {
-    load_csv(csv_path(base, symbol, tf))
+    load_csv(resolve_csv_path(base, venue_key, tf))
 }
 
 const HEADER: [&str; 10] = [
@@ -268,8 +331,106 @@ mod tests {
 
     #[test]
     fn csv_path_layout() {
-        let p = csv_path("/data/klines", "btcusdt", Timeframe::parse("8h").unwrap());
-        assert_eq!(p, PathBuf::from("/data/klines/8h/BTCUSDT_8h.csv"));
+        // §6.1 命名空间布局：exchange/market 落目录段，文件名保留裸挂牌代码
+        let p = csv_path(
+            "/data/klines",
+            "binance/crypto_perpetual/BTCUSDT",
+            Timeframe::parse("8h").unwrap(),
+        );
+        assert_eq!(
+            p,
+            PathBuf::from("/data/klines/8h/binance/crypto_perpetual/BTCUSDT_8h.csv")
+        );
+        // 裸 symbol 退化 = 旧布局（迁移期未升级调用者零破坏）
+        let bare = csv_path("/data/klines", "btcusdt", Timeframe::parse("8h").unwrap());
+        assert_eq!(
+            bare,
+            legacy_csv_path("/data/klines", "btcusdt", Timeframe::parse("8h").unwrap())
+        );
+        assert_eq!(bare, PathBuf::from("/data/klines/8h/BTCUSDT_8h.csv"));
+        // §14-3 CSV 面：同名裸 symbol 跨交易所不共享文件
+        assert_ne!(
+            csv_path("/d", "binance/crypto_perpetual/BTCUSDT", Timeframe::M1),
+            csv_path("/d", "bybit/crypto_perpetual/BTCUSDT", Timeframe::M1)
+        );
+    }
+
+    /// 迁移钉：旧布局存量文件经 resolve 一次 rename 进命名空间布局，
+    /// 内容原样、旧位置不留副本（零下载、零复制）。
+    #[test]
+    fn resolve_csv_path_migrates_legacy_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let old = legacy_csv_path(dir.path(), "BTCUSDT", Timeframe::M1);
+        fs::create_dir_all(old.parent().unwrap()).unwrap();
+        save_csv(&old, &[candle(0, 10.0), candle(1, 11.0)]).unwrap();
+
+        let p = resolve_csv_path(
+            dir.path(),
+            "binance/crypto_perpetual/BTCUSDT",
+            Timeframe::M1,
+        );
+        assert_eq!(
+            p,
+            csv_path(
+                dir.path(),
+                "binance/crypto_perpetual/BTCUSDT",
+                Timeframe::M1
+            )
+        );
+        assert!(p.exists(), "迁移后新路径存在");
+        assert!(!old.exists(), "旧路径不残留（rename 非复制）");
+        let loaded = load_csv(&p).unwrap();
+        assert_eq!(loaded.len(), 2, "内容原样搬迁");
+        assert_eq!(loaded[1].close, 11.0);
+
+        // 幂等：再次 resolve 不再动文件
+        let p2 = resolve_csv_path(
+            dir.path(),
+            "binance/crypto_perpetual/BTCUSDT",
+            Timeframe::M1,
+        );
+        assert_eq!(p, p2);
+        assert_eq!(load_csv(&p2).unwrap().len(), 2);
+
+        // load_or_empty 走同一迁移路径
+        let all = load_or_empty(
+            dir.path(),
+            "binance/crypto_perpetual/BTCUSDT",
+            Timeframe::M1,
+        )
+        .unwrap();
+        assert_eq!(all.len(), 2);
+    }
+
+    /// 跨所同名共存钉：两个交易所的同名裸 symbol 各写各文件互不影响。
+    #[test]
+    fn same_symbol_two_venues_do_not_share_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = resolve_csv_path(
+            dir.path(),
+            "binance/crypto_perpetual/BTCUSDT",
+            Timeframe::M1,
+        );
+        let b = resolve_csv_path(dir.path(), "bybit/crypto_perpetual/BTCUSDT", Timeframe::M1);
+        fs::create_dir_all(a.parent().unwrap()).unwrap();
+        fs::create_dir_all(b.parent().unwrap()).unwrap();
+        save_csv(&a, &[candle(0, 10.0)]).unwrap();
+        save_csv(&b, &[candle(0, 99.0)]).unwrap();
+        assert_eq!(
+            load_or_empty(
+                dir.path(),
+                "binance/crypto_perpetual/BTCUSDT",
+                Timeframe::M1
+            )
+            .unwrap()[0]
+                .close,
+            10.0
+        );
+        assert_eq!(
+            load_or_empty(dir.path(), "bybit/crypto_perpetual/BTCUSDT", Timeframe::M1).unwrap()[0]
+                .close,
+            99.0
+        );
     }
 
     #[test]
