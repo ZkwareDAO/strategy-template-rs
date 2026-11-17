@@ -6,16 +6,38 @@
 //! - 每行带 deleted（0/1）、created_at、updated_at（毫秒时间戳）。
 //!
 //! S2：`{base}/{YYYYMMDD}/{model}.csv` 定时快照 + 启动跨日去重恢复。
+//!
+//! ## 行生命周期（store 表内存 → 日文件）
+//!
+//! - 出生：`insert` / `upsert` 首次见到 id → `created_at = updated_at = now`；
+//!   业务已终态时记 `terminal_at`（业务时间优先，缺省取 now）。
+//! - 更新：`upsert` 命中已有行 → 保留 `created_at` / `terminal_at`，刷新
+//!   `updated_at`；离开终态时清 `terminal_at`；复活软删行时清 `deleted_at`。
+//! - 软删：`delete` → `deleted=1`、`deleted_at=now`，当日仍进快照。
+//! - 裁剪：`flush` 每次按 UTC 日调 `purge_before_day`，归属日（终态行的
+//!   `terminal_at`、软删行的 `deleted_at`）早于当日才物理删除；当日终态
+//!   保留到次日，供当日快照审计。裁剪无墓碑，历史日文件不回改。
+//! - 恢复：裁剪模式只读最新存在的日文件；`deleted` 行不入内存；终态行只
+//!   保留最新日（当天）的，更早日期的终态不复活（不读旧日文件即结构保证）。
+//! - 注意：裁剪后同一 id 若再被 `upsert`（表里已无该行）会按新行重建、
+//!   `created_at` 重置为当时时钟；持有副本账本的上层（runner）必须在
+//!   写表前自行过滤旧日终态。
 
 pub mod persist;
 
+// ─── 公共 API re-export ────────────────────────────────────────────────────
+// PersistRecord / StorageBackend / CsvStorage 是 store 的公共 API：
+// 上层（signals manager 等）通过 `strategy_store::PersistRecord` 直接引用，
+// 无需深入 `persist` 模块路径。
+pub use persist::{CsvStorage, PersistRecord, StorageBackend};
+pub use persist::{FlushMarker, FlushTableDigest};
+
 use std::any::Any;
 use std::collections::HashMap;
-use std::fs;
-use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, RwLock};
+use std::path::Path;
+use std::sync::Arc;
 
-use persist::CsvRecord;
+use parking_lot::{Mutex, RwLock};
 
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -40,11 +62,25 @@ pub trait Model: Clone + Serialize + DeserializeOwned + Send + Sync + 'static {
     const NAME: &'static str;
     /// 业务主键（同 model 内唯一）。
     fn id(&self) -> &str;
-    /// 业务终态：无后续状态转移、且无挂起工作。跨日 flush 时随软删行一并
-    /// 物理裁剪（spec 2026-10-09-store-terminal-pruning §设计.1）。
+    /// 业务终态：无后续状态转移、且无挂起工作。归属日早于今日的终态行
+    /// 在 flush 时物理裁剪（spec 2026-10-09-store-terminal-pruning §设计.1）。
     /// 默认 false = 永不裁剪，向后兼容。
     fn is_terminal(&self) -> bool {
         false
+    }
+    /// 终态发生时间（毫秒），裁剪归属日的判据；当日终态保留到次日。
+    /// 默认 None = 由 `Stored` 在首次进入终态时按当时时钟记录。
+    /// 有业务时间字段的 model（如平仓 `closed_at`）应显式实现：`updated_at_ms`
+    /// 会被每轮 `upsert` 刷新，不能用它判归属日。
+    fn terminal_at_ms(&self) -> Option<i64> {
+        None
+    }
+    /// P1-7：共享表的二级索引键（如 `strategy_name`、`symbol`）。
+    /// 返回 `Some` 的 model 在 `ModelTable` 中自动维护 `scope -> [id]` 索引，
+    /// `by_scope()` 查询无需全表扫描。默认 `None` = 不索引。
+    /// scope 不要求唯一——多行可共享同一 scope（如同一策略的多次交易）。
+    fn scope(&self) -> Option<&str> {
+        None
     }
 }
 
@@ -76,27 +112,42 @@ pub(crate) struct Stored<T> {
     pub deleted: bool,
     pub created_at_ms: i64,
     pub updated_at_ms: i64,
+    /// 首次进入终态的时间：裁剪归属日。业务字段优先，缺省取当时时钟。
+    pub terminal_at_ms: Option<i64>,
+    /// 软删时间：deleted=1 行的裁剪归属日。
+    pub deleted_at_ms: Option<i64>,
 }
 
 /// 行句柄：总表持有的就是它，每行一把独立子锁。
 pub(crate) type RowHandle<T> = Arc<Mutex<Stored<T>>>;
 
 /// 新建活行元数据（未删除，created_at = updated_at = now）。
-fn active_stored<T>(data: T, now: i64) -> Stored<T> {
+fn active_stored<T: Model>(data: T, now: i64) -> Stored<T> {
+    let terminal_at_ms = data
+        .is_terminal()
+        .then(|| data.terminal_at_ms().unwrap_or(now));
     Stored {
         data,
         deleted: false,
         created_at_ms: now,
         updated_at_ms: now,
+        terminal_at_ms,
+        deleted_at_ms: None,
     }
 }
 
 /// 一个 model 的总表：总表 RwLock 索引行句柄，每行一把独立子锁。
 ///
 /// 锁纪律：子锁只在同步闭包期持有，**严禁跨 await**；外部读到的永远是克隆值。
+///
+/// P1-7：`scope_index` 是二级索引（`scope -> {id}`），仅在 `Model::scope()`
+/// 返回 `Some` 时维护。`by_scope()` 利用此索引避免全表扫描——共享表
+/// （多策略同表）行数增长时查询性能从 O(n) → O(k)，k = 该 scope 下的行数。
 pub struct ModelTable<T: Model> {
     model: &'static str,
     rows: RwLock<HashMap<String, RowHandle<T>>>,
+    /// P1-7：scope -> {id} 二级索引。scope 为 None 的行不进索引。
+    scope_index: RwLock<HashMap<String, Vec<String>>>,
     clock: Arc<dyn Clock>,
 }
 
@@ -105,19 +156,33 @@ impl<T: Model> ModelTable<T> {
         Self {
             model: T::NAME,
             rows: RwLock::new(HashMap::new()),
+            scope_index: RwLock::new(HashMap::new()),
             clock,
         }
     }
 
     /// 取行句柄后立即释放总表读锁，避免持总表锁等子锁。
     fn row_handle(&self, id: &str) -> Option<RowHandle<T>> {
-        self.rows.read().expect("store 总表锁中毒").get(id).cloned()
+        self.rows.read().get(id).cloned()
+    }
+
+    /// P1-7：将 (id, scope) 加入二级索引。调用方需持有 rows 写锁或保证
+    /// 无并发写入（insert/upsert/load_merged 内调用）。
+    fn index_scope(&self, id: &str, scope: Option<&str>) {
+        if let Some(s) = scope {
+            self.scope_index
+                .write()
+                .entry(s.to_string())
+                .or_default()
+                .push(id.to_string());
+        }
     }
 
     /// 新建一行（created_at = updated_at = now）；主键冲突报错且不覆盖。
     pub fn insert(&self, data: T) -> Result<()> {
         let id = data.id().to_string();
-        let mut rows = self.rows.write().expect("store 总表锁中毒");
+        let scope = data.scope().map(|s| s.to_string());
+        let mut rows = self.rows.write();
         if rows.contains_key(&id) {
             return Err(StoreError::AlreadyExists {
                 model: self.model,
@@ -126,6 +191,8 @@ impl<T: Model> ModelTable<T> {
         }
         let now = self.clock.now_ms();
         rows.insert(id.clone(), Arc::new(Mutex::new(active_stored(data, now))));
+        // P1-7：维护二级索引（scope 已在上游提取，此处传引用避免移动问题）。
+        self.index_scope(&id, scope.as_deref());
         Ok(())
     }
 
@@ -136,33 +203,57 @@ impl<T: Model> ModelTable<T> {
         use std::collections::hash_map::Entry;
         let now = self.clock.now_ms();
         let id = data.id().to_string();
-        let handle = {
-            let mut rows = self.rows.write().expect("store 总表锁中毒");
+        let scope = data.scope().map(|s| s.to_string());
+        let is_new = {
+            let mut rows = self.rows.write();
             match rows.entry(id.clone()) {
                 Entry::Vacant(e) => {
                     e.insert(Arc::new(Mutex::new(active_stored(data, now))));
-                    return;
+                    true
                 }
-                Entry::Occupied(e) => Arc::clone(e.get()),
+                Entry::Occupied(e) => {
+                    let handle = Arc::clone(e.get());
+                    let mut row = handle.lock();
+                    // 归属日取业务时间；没有业务字段时按首次进入终态的时钟记。
+                    // 不随每轮 upsert 刷新，否则「当天平仓」永远判在今天。
+                    let was_terminal = row.data.is_terminal();
+                    let terminal_at_ms = if data.is_terminal() {
+                        data.terminal_at_ms().or(if was_terminal {
+                            row.terminal_at_ms
+                        } else {
+                            Some(now)
+                        })
+                    } else {
+                        None
+                    };
+                    row.data = data;
+                    row.terminal_at_ms = terminal_at_ms;
+                    row.deleted = false; // 复活同日软删行
+                    row.deleted_at_ms = None;
+                    row.updated_at_ms = now;
+                    false
+                }
             }
         };
-        let mut row = handle.lock().expect("store 行锁中毒");
-        row.data = data;
-        row.deleted = false; // 复活同日软删行（deleted 标志路径，与墓碑无关）
-        row.updated_at_ms = now;
+        // P1-7：仅新行加入索引（已存在行的 scope 在 insert 时已索引，
+        // upsert 不改 id 也不改 scope——如果 scope 变了则索引会有微量陈旧，
+        // 但 scope 作为业务分区键通常不变，可接受）。
+        if is_new {
+            self.index_scope(&id, scope.as_deref());
+        }
     }
 
     /// 读一个未删除行（返回克隆，外部修改不影响表内）。
     pub fn get(&self, id: &str) -> Option<T> {
         let handle = self.row_handle(id)?;
-        let row = handle.lock().expect("store 行锁中毒");
+        let row = handle.lock();
         (!row.deleted).then(|| row.data.clone())
     }
 
     /// 行元数据（含已删除行，恢复/审计用）。
     pub fn meta(&self, id: &str) -> Option<RowMeta> {
         let handle = self.row_handle(id)?;
-        let row = handle.lock().expect("store 行锁中毒");
+        let row = handle.lock();
         Some(RowMeta {
             deleted: row.deleted,
             created_at_ms: row.created_at_ms,
@@ -171,11 +262,33 @@ impl<T: Model> ModelTable<T> {
     }
 
     /// 全部未删除行（克隆）。
+    /// 先 clone 行句柄释放表读锁，再逐行加锁克隆数据——避免持表锁期间逐行
+    /// 加锁阻塞写者。
     pub fn list(&self) -> Vec<T> {
-        let rows = self.rows.read().expect("store 总表锁中毒");
-        rows.values()
+        let handles: Vec<RowHandle<T>> = self.rows.read().values().cloned().collect();
+        handles
+            .into_iter()
             .filter_map(|h| {
-                let row = h.lock().expect("store 行锁中毒");
+                let row = h.lock();
+                (!row.deleted).then(|| row.data.clone())
+            })
+            .collect()
+    }
+
+    /// P1-7：按 scope 查询未删除行（克隆）。
+    /// 利用二级索引 `scope -> {id}` 直接定位，无需全表扫描。
+    /// scope 不存在或 model 未实现 `scope()` 返回空 Vec。
+    /// 先 clone id 列表释放索引读锁，再逐行取句柄+加锁——锁纪律与 `list()` 一致。
+    pub fn by_scope(&self, scope: &str) -> Vec<T> {
+        let ids: Vec<String> = {
+            let idx = self.scope_index.read();
+            idx.get(scope).cloned().unwrap_or_default()
+        };
+        let rows = self.rows.read();
+        ids.into_iter()
+            .filter_map(|id| {
+                let handle = rows.get(&id)?;
+                let row = handle.lock();
                 (!row.deleted).then(|| row.data.clone())
             })
             .collect()
@@ -187,12 +300,14 @@ impl<T: Model> ModelTable<T> {
             Some(h) => h,
             None => return false,
         };
-        let mut row = handle.lock().expect("store 行锁中毒");
+        let mut row = handle.lock();
         if row.deleted {
             return false;
         }
         row.deleted = true;
-        row.updated_at_ms = self.clock.now_ms();
+        let now = self.clock.now_ms();
+        row.deleted_at_ms = Some(now);
+        row.updated_at_ms = now;
         true
     }
 
@@ -200,7 +315,7 @@ impl<T: Model> ModelTable<T> {
     /// 闭包内禁止 await、禁止调用网关。
     pub fn with<R>(&self, id: &str, f: impl FnOnce(&mut T) -> R) -> Option<R> {
         let handle = self.row_handle(id)?;
-        let mut row = handle.lock().expect("store 行锁中毒");
+        let mut row = handle.lock();
         if row.deleted {
             return None;
         }
@@ -211,14 +326,28 @@ impl<T: Model> ModelTable<T> {
 }
 
 /// 类型擦除的表接口：Store 统一调度落盘/跨日清 deleted/恢复，不关心行类型。
+///
+/// 方法与存储格式无关——`snapshot()` 产出通用 `PersistRecord`，
+/// `load_merged()` 消费通用 `PersistRecord`。具体的 CSV/sled 编码
+/// 由 `StorageBackend` 实现承担。
 trait Persistable: Any + Send + Sync {
     fn name(&self) -> &'static str;
-    fn snapshot_csv(&self) -> Result<Vec<CsvRecord>>;
-    /// 物理清除终态行（deleted 标志 OR is_terminal），跨日切换时调用。
-    fn purge_terminal(&self) -> usize;
-    /// 启动恢复：载入跨日去重后的记录（deleted 终态跳过）。
-    fn load_merged(&self, merged: HashMap<String, CsvRecord>, prune_enabled: bool)
-        -> Result<usize>;
+    /// 全表快照（格式无关的 `PersistRecord`）。
+    fn snapshot(&self) -> Result<Vec<PersistRecord>>;
+    /// 物理清除归属日早于 `day` 的终态行（软删行按删除时间、业务终态行按
+    /// 终态时间）。当日终态必须保留——它是当日快照的审计内容；更早的终态
+    /// 已在它们自己的日文件里，留着只会让 `persist_round` 把它们写回当日。
+    /// 判不出归期的行保守保留。
+    fn purge_before_day(&self, day: &str) -> usize;
+    /// 启动恢复：载入去重后的记录。`deleted` 行不入活表；终态行只在
+    /// `latest_day` 当天时保留（内存语义是「当天终态 + 活行」，重启不能把
+    /// 当天已平/已成交的行丢掉），更早日期的终态不复活。
+    fn load_merged(
+        &self,
+        merged: HashMap<String, PersistRecord>,
+        prune_enabled: bool,
+        latest_day: Option<&str>,
+    ) -> Result<usize>;
     fn into_any_arc(self: Arc<Self>) -> Arc<dyn Any + Send + Sync>;
 }
 
@@ -227,9 +356,17 @@ impl<T: Model> Persistable for ModelTable<T> {
         self.model
     }
 
-    fn snapshot_csv(&self) -> Result<Vec<CsvRecord>> {
-        let rows = self.rows.read().expect("store 总表锁中毒");
-        let mut ids: Vec<&str> = rows.keys().map(String::as_str).collect();
+    fn snapshot(&self) -> Result<Vec<PersistRecord>> {
+        // 先 clone 行句柄 + id 释放表读锁，再逐行加锁序列化——避免持表锁
+        // 期间逐行加锁阻塞写者（flush 在 spawn_blocking 中调用，但仍可能
+        // 与同表的其他写者竞争）。
+        let entries: Vec<(String, RowHandle<T>)> = {
+            let rows = self.rows.read();
+            rows.iter()
+                .map(|(id, h)| (id.clone(), Arc::clone(h)))
+                .collect()
+        };
+        let mut ids: Vec<&str> = entries.iter().map(|(id, _)| id.as_str()).collect();
         ids.sort();
         // 活行与墓碑共用同一组落盘列，仅 deleted 取值与数据源不同。
         let encode = |g: &Stored<T>| -> Result<(u8, i64, i64, String)> {
@@ -241,14 +378,16 @@ impl<T: Model> Persistable for ModelTable<T> {
             ))
         };
         ids.into_iter()
-            .map(|id| -> Result<CsvRecord> {
-                let g = rows
-                    .get(id)
+            .map(|id| -> Result<PersistRecord> {
+                let handle = entries
+                    .iter()
+                    .find(|(eid, _)| eid == id)
                     .expect("id 必在")
-                    .lock()
-                    .expect("store 行锁中毒");
+                    .1
+                    .clone();
+                let g = handle.lock();
                 let (deleted, created_at_ms, updated_at_ms, payload_json) = encode(&g)?;
-                Ok(CsvRecord {
+                Ok(PersistRecord {
                     id: id.to_string(),
                     deleted,
                     created_at_ms,
@@ -259,24 +398,46 @@ impl<T: Model> Persistable for ModelTable<T> {
             .collect()
     }
 
-    fn purge_terminal(&self) -> usize {
-        let mut rows = self.rows.write().expect("store 总表锁中毒");
+    fn purge_before_day(&self, day: &str) -> usize {
+        let mut rows = self.rows.write();
         let before = rows.len();
+        // P1-7：收集被物理删除的 id，用于清理 scope_index。
+        let mut purged_ids: Vec<String> = Vec::new();
         // 物理丢弃，不再进墓碑（墓碑随本设计整体删除）。活行判据：
-        // 未软删 且 业务未终态。retain 闭包内拿行子锁，与既有锁序一致。
-        rows.retain(|_, h| {
-            let g = h.lock().expect("store 行锁中毒");
-            !(g.deleted || g.data.is_terminal())
+        // 未软删 且 业务未终态 或 归属日不早于 day。
+        rows.retain(|id, h| {
+            let g = h.lock();
+            let before_day = |t: Option<i64>| t.is_some_and(|t| persist::day_str(t).as_str() < day);
+            let stale = if g.deleted {
+                before_day(g.deleted_at_ms)
+            } else if g.data.is_terminal() {
+                before_day(g.terminal_at_ms)
+            } else {
+                false
+            };
+            if stale {
+                purged_ids.push(id.clone());
+            }
+            !stale
         });
+        // P1-7：清理被 purge 行的 scope 索引条目。
+        if !purged_ids.is_empty() {
+            let mut idx = self.scope_index.write();
+            for ids in idx.values_mut() {
+                ids.retain(|id| !purged_ids.contains(id));
+            }
+            idx.retain(|_, ids| !ids.is_empty());
+        }
         before - rows.len()
     }
 
     fn load_merged(
         &self,
-        merged: HashMap<String, CsvRecord>,
+        merged: HashMap<String, PersistRecord>,
         prune_enabled: bool,
+        latest_day: Option<&str>,
     ) -> Result<usize> {
-        let mut rows = self.rows.write().expect("store 总表锁中毒");
+        let mut rows = self.rows.write();
         let mut loaded = 0;
         for rec in merged.into_values() {
             // 活表现有 id（含未 flush 的软删行）永远优先于磁盘：同进程内存是真相，
@@ -299,10 +460,15 @@ impl<T: Model> Persistable for ModelTable<T> {
                 }
             };
             let deleted = rec.deleted == 1;
-            // 终态盘载行不入表：裁剪模式防复活的结构保证的兜底半边
-            // （另一半是 recover 单日化）；兼容模式下不按 is_terminal 过滤
+            // 终态盘载行：最新日（当天）的保留——「当天终态 + 活行」是内存
+            // 快照的完整内容，重启后当天已平/已成交的行仍在；更早日期的
+            // 终态只在各自日文件里，恢复最新日即可保证不复活。
             if prune_enabled && data.is_terminal() {
-                continue;
+                let terminal_day =
+                    persist::day_str(data.terminal_at_ms().unwrap_or(rec.updated_at_ms));
+                if latest_day.is_some_and(|latest| terminal_day.as_str() < latest) {
+                    continue;
+                }
             }
             if deleted {
                 // 软删盘载行不入活表（原先进墓碑防跨日复活；现在
@@ -310,15 +476,33 @@ impl<T: Model> Persistable for ModelTable<T> {
                 // 兼容模式多日合并取最新后软删行本就不入活表，语义等价）
                 continue;
             }
+            // P1-7：重建 scope 二级索引（恢复时整表重建，无并发写）。
+            let scope = data.scope().map(|s| s.to_string());
+            // 终态时间取业务字段；旧快照缺字段时回退到落盘时的 updated_at，
+            // 保证重启后裁剪判据仍有归期（否则这些行会永久滞留内存）。
+            let terminal_at_ms = data
+                .is_terminal()
+                .then(|| data.terminal_at_ms().unwrap_or(rec.updated_at_ms));
             rows.insert(
-                rec.id,
+                rec.id.clone(),
                 Arc::new(Mutex::new(Stored {
                     data,
                     deleted: false,
                     created_at_ms: rec.created_at_ms,
                     updated_at_ms: rec.updated_at_ms,
+                    terminal_at_ms,
+                    deleted_at_ms: None,
                 })),
             );
+            // 索引在 rows 写锁内重建——scope_index 用独立锁，此时无并发
+            // 写入（recover 是启动期单线程），安全。
+            if let Some(ref s) = scope {
+                self.scope_index
+                    .write()
+                    .entry(s.clone())
+                    .or_default()
+                    .push(rec.id.clone());
+            }
             loaded += 1;
         }
         Ok(loaded)
@@ -330,8 +514,15 @@ impl<T: Model> Persistable for ModelTable<T> {
 }
 
 /// 统一门面：按 model 类型持有总表；定时 flush 落盘，启动 recover 恢复。
+///
+/// 存储后端通过 `StorageBackend` trait 注入（类似 `ExecutionPort`）——
+/// 默认 `CsvStorage`，未来 sled 等只需实现同一 trait 并在构造时注入。
+///
+/// P2-11：连接注册表采用类型化泛型 `register_connection::<T>()`，
+/// 替代 `dyn Any` 擦除——编译期保证类型安全，取错类型编译报错而非运行时 None。
 pub struct Store {
-    base: PathBuf,
+    /// 存储后端（端口注入）。CSV 是默认实现；切换 sled 只需换一个 impl。
+    backend: Arc<dyn StorageBackend>,
     clock: Arc<dyn Clock>,
     tables: RwLock<HashMap<&'static str, Arc<dyn Persistable>>>,
     /// 上次落盘的 UTC 日（YYYYMMDD）；跨日触发终态裁剪。
@@ -339,126 +530,187 @@ pub struct Store {
     /// 跨日裁剪策略（spec §设计.7）：true=裁终态行+单日 recover；
     /// false=旧行为（多日 recover），线上回滚开关。
     prune_enabled: bool,
+    /// P2-11：类型安全的连接注册表。
+    /// key = `TypeId::of::<T>()`，value = `Arc<T>` 擦除为 `Arc<dyn Any + Send + Sync>`。
+    /// 取出时 `downcast_ref::<T>()` 保证编译期类型安全（泛型 T 在调用点已知）。
+    connections: RwLock<HashMap<std::any::TypeId, Arc<dyn Any + Send + Sync>>>,
 }
 
 impl Store {
+    /// 默认 CSV 后端构造（向后兼容）。
     pub fn new(base: impl AsRef<Path>, clock: Arc<dyn Clock>) -> Self {
-        Self::new_with_policy(base, clock, true)
+        Self::with_backend(Arc::new(CsvStorage::new(base)), clock, true)
     }
 
-    /// 状态根目录（{base}/{YYYYMMDD}/{model}.csv 的 base）。
-    /// 仅供需要对日文件做定向读取的上层（如 signals 启动交叉对账）使用。
-    pub fn base(&self) -> &std::path::Path {
-        &self.base
-    }
-
+    /// 默认 CSV 后端 + 裁剪策略。
     pub fn new_with_policy(
         base: impl AsRef<Path>,
         clock: Arc<dyn Clock>,
         prune_enabled: bool,
     ) -> Self {
+        Self::with_backend(Arc::new(CsvStorage::new(base)), clock, prune_enabled)
+    }
+
+    /// 注入自定义存储后端构造（切换 sled 等的入口）。
+    pub fn with_backend(
+        backend: Arc<dyn StorageBackend>,
+        clock: Arc<dyn Clock>,
+        prune_enabled: bool,
+    ) -> Self {
         Self {
-            base: base.as_ref().to_path_buf(),
+            backend,
             clock,
             tables: RwLock::new(HashMap::new()),
             last_flush_day: Mutex::new(None),
             prune_enabled,
+            connections: RwLock::new(HashMap::new()),
         }
+    }
+
+    /// 状态根目录（`StorageBackend::base_path()` 的便捷出口）。
+    /// 仅供需要对日文件做定向读取的上层（如 signals 启动交叉对账）使用。
+    pub fn base(&self) -> &std::path::Path {
+        self.backend.base_path()
     }
 
     /// 同一 model 类型在同一 Store 内永远拿到同一张表。
     pub fn table<T: Model>(&self) -> Arc<ModelTable<T>> {
-        if let Some(t) = self.tables.read().expect("store 注册表锁中毒").get(T::NAME) {
+        if let Some(t) = self.tables.read().get(T::NAME) {
             return downcast::<T>(Arc::clone(t));
         }
-        let mut tables = self.tables.write().expect("store 注册表锁中毒");
+        let mut tables = self.tables.write();
         let table: Arc<dyn Persistable> = Arc::new(ModelTable::<T>::new(Arc::clone(&self.clock)));
         let entry = Arc::clone(tables.entry(T::NAME).or_insert(table));
         downcast::<T>(entry)
     }
 
-    /// 把所有已注册表的当前内存快照原子写到当日目录
-    /// `{base}/{YYYYMMDD}/{model}.csv`；检测到跨日时先清扫 deleted=1 的行。
+    /// 通过存储后端读取指定日期、指定表的全部原始记录。
+    /// 供上层（如 `SignalManager::load_filled_open_from_disk`）直接扫描历史日
+    /// 文件用——不经 `load_merged` 的 is_terminal 过滤，原始数据直达。
+    pub fn read_table_raw(&self, day: &str, table_name: &str) -> Result<Vec<PersistRecord>> {
+        self.backend.read_table(day, table_name)
+    }
+
+    /// 通过存储后端列出所有日目录名（升序）。
+    pub fn list_days(&self) -> Result<Vec<String>> {
+        self.backend.list_days()
+    }
+
+    /// P2-11：注册一个共享连接对象（如 WS 连接、gRPC client）。
+    /// 同一类型 `T` 在同一 Store 内只保留最后一次注册。
+    /// 取出时用 [`Self::connection::<T>()`]——泛型保证编译期类型安全。
+    pub fn register_connection<T: Send + Sync + 'static>(&self, conn: Arc<T>) {
+        let type_id = std::any::TypeId::of::<T>();
+        self.connections
+            .write()
+            .insert(type_id, conn as Arc<dyn Any + Send + Sync>);
+    }
+
+    /// P2-11：按类型取出已注册的连接对象。
+    /// 未注册返回 `None`——调用方按需 `.expect()` 或 fallback。
+    pub fn connection<T: Send + Sync + 'static>(&self) -> Option<Arc<T>> {
+        let type_id = std::any::TypeId::of::<T>();
+        let conns = self.connections.read();
+        conns
+            .get(&type_id)
+            .and_then(|arc| arc.downcast_ref::<Arc<T>>())
+            .cloned()
+    }
+
+    /// 当前时钟的 UTC 日（`YYYYMMDD`），与 `flush` 落盘同口径。
+    /// 上层（runner 账本）按日过滤持久化时必须用它：两边日界判定错开
+    /// 会让旧终态在跨日瞬间漏网或提前被写回。
+    pub fn current_day(&self) -> String {
+        persist::day_str(self.clock.now_ms())
+    }
+
+    /// 把所有已注册表的当前内存快照通过 `StorageBackend` 写入持久化层；
+    /// 每次 flush 先按日裁掉归属日早于今日的终态行。
     pub fn flush(&self) -> Result<()> {
-        let mut last = self.last_flush_day.lock().expect("flush 锁中毒");
+        let mut last = self.last_flush_day.lock();
         let today = persist::day_str(self.clock.now_ms());
-        // 单调守卫：仅当日严格前进才 rollover/purge；时钟回拨时继续写入最后日期，
-        // 避免向历史目录覆写全量快照或提前清扫 deleted。
-        let (day, rollover) = match last.as_deref() {
+        // 单调守卫：仅当日严格前进才写新日目录；时钟回拨时继续写入最后日期，
+        // 避免向历史目录覆写全量快照或提前清扫终态。
+        let (day, _rollover) = match last.as_deref() {
             None => (today, false),
             Some(prev) if today.as_str() > prev => (today, true),
             Some(prev) => (prev.to_string(), false),
         };
 
-        let tables: Vec<Arc<dyn Persistable>> = self
-            .tables
-            .read()
-            .expect("store 注册表锁中毒")
-            .values()
-            .cloned()
-            .collect();
+        let tables: Vec<Arc<dyn Persistable>> = {
+            let reg = self.tables.read();
+            let mut pairs: Vec<(&&'static str, &Arc<dyn Persistable>)> = reg.iter().collect();
+            pairs.sort_by_key(|(name, _)| *name);
+            pairs.into_iter().map(|(_, v)| v.clone()).collect()
+        };
+        // P2-10：收集各表摘要，flush 末尾写 marker（跨表原子性补偿）。
+        // 表按 name 排序遍历——marker 中 tables 数组顺序确定性（回测字节级复现）。
+        let mut digests: Vec<persist::FlushTableDigest> = Vec::with_capacity(tables.len());
         for t in &tables {
-            if rollover && self.prune_enabled {
-                t.purge_terminal();
+            // 每次落盘都按日裁剪（幂等）：重启后 `last_flush_day` 为空，
+            // 只在 rollover 裁会漏掉停机期间积压的旧日终态。
+            if self.prune_enabled {
+                t.purge_before_day(&day);
             }
-            let records = t.snapshot_csv()?;
-            let path = self.base.join(&day).join(format!("{}.csv", t.name()));
-            persist::write_day_csv(&path, &records)?;
+            let records = t.snapshot()?;
+            let name = t.name().to_string();
+            let row_count = records.len();
+            let id_crc32 = persist::compute_id_crc32(&records);
+            digests.push(persist::FlushTableDigest {
+                name,
+                row_count,
+                id_crc32,
+            });
+            self.backend.write_table(&day, t.name(), &records)?;
+        }
+        // P2-10：写 flush marker——恢复时可检测跨表不一致。
+        let marker = persist::FlushMarker {
+            flushed_at_ms: self.clock.now_ms(),
+            tables: digests,
+        };
+        if let Err(e) = self.backend.write_marker(&day, &marker) {
+            // marker 写失败不致命——核心数据已落盘，仅告警。
+            tracing::warn!(error = %e, day = %day, "flush_marker 写入失败，跨表一致性校验不可用");
         }
         *last = Some(day);
         Ok(())
     }
 
     /// 启动恢复。
-    /// 裁剪模式（prune_enabled=true）：快照即活状态——只读最新**存在**的
-    /// 日文件（跨日重启、新日尚未 flush 时即昨天的文件），终态行结构上
-    /// 不可能复活；文件缺失/损坏 fail-open 空表，绝不回退读更旧文件
-    /// （spec §设计.5）。
+    /// 裁剪模式（prune_enabled=true）：只读最新**存在**的日文件（跨日重启、
+    /// 新日尚未 flush 时即昨天的文件）。最新日文件里可能含当天已平/已成交的
+    /// 终态行——它们是「当天终态 + 活行」内存快照的一部分，恢复时保留；
+    /// 更早日期的终态不复活（防复活由「不读旧日文件」结构性保证）。
+    /// 文件缺失/损坏 fail-open 空表，绝不回退读更旧文件（spec §设计.5）。
     /// 兼容模式（false）：旧行为，升序读全部日文件，同 id 取 updated_at_ms
     /// 最新，靠 deleted 标志防复活。
     pub fn recover<T: Model>(&self) -> Result<usize> {
         let table = self.table::<T>();
-        let mut merged: HashMap<String, CsvRecord> = HashMap::new();
+        let mut merged: HashMap<String, PersistRecord> = HashMap::new();
 
-        let rd = match fs::read_dir(&self.base) {
-            Ok(rd) => rd,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
-            Err(e) => return Err(e.into()),
-        };
-        let mut day_dirs: Vec<(String, PathBuf)> = rd
-            .filter_map(|e| e.ok())
-            .map(|e| e.path())
-            .filter_map(|d| {
-                let name = d.file_name()?.to_str()?.to_string();
-                (d.is_dir() && name.len() == 8 && name.bytes().all(|b| b.is_ascii_digit()))
-                    .then_some((name, d))
-            })
-            .collect();
-        day_dirs.sort_by(|a, b| a.0.cmp(&b.0));
+        let day_dirs = self.backend.list_days()?;
+        let latest_day = day_dirs.last().map(String::as_str);
 
         if self.prune_enabled {
             // 只读最新存在的日文件
-            let Some((_, latest)) = day_dirs.last() else {
+            let Some(latest) = latest_day else {
                 return Ok(0);
             };
-            let file = latest.join(format!("{}.csv", T::NAME));
-            if !file.exists() {
+            let records = self.backend.read_table(latest, T::NAME)?;
+            if records.is_empty() {
                 return Ok(0);
             }
-            for rec in persist::read_day_csv(&file)? {
+            for rec in records {
                 merged.insert(rec.id.clone(), rec);
             }
         } else {
             // 兼容模式：多日合并，同 id 取 updated_at_ms 最新
-            for (_, d) in &day_dirs {
-                let file = d.join(format!("{}.csv", T::NAME));
-                if !file.exists() {
-                    continue;
-                }
-                for rec in persist::read_day_csv(&file)? {
+            for day in &day_dirs {
+                let records = self.backend.read_table(day, T::NAME)?;
+                for rec in records {
                     merged
                         .entry(rec.id.clone())
-                        .and_modify(|cur: &mut CsvRecord| {
+                        .and_modify(|cur: &mut PersistRecord| {
                             if rec.updated_at_ms > cur.updated_at_ms {
                                 *cur = rec.clone();
                             }
@@ -467,7 +719,30 @@ impl Store {
                 }
             }
         }
-        table.load_merged(merged, self.prune_enabled)
+        // P2-10：flush marker 一致性校验——检测跨表非原子写导致的
+        // 数据不一致（进程崩溃在部分表写完时）。仅告警不致命。
+        if self.prune_enabled {
+            if let Some(latest) = day_dirs.last() {
+                if let Some(marker) = self.backend.read_marker(latest) {
+                    let merged_vec: Vec<PersistRecord> = merged.values().cloned().collect();
+                    if let Some(digest) = marker.tables.iter().find(|d| d.name == T::NAME) {
+                        if let Err(reason) = persist::verify_table_digest(&merged_vec, digest) {
+                            tracing::warn!(
+                                model = T::NAME,
+                                day = %latest,
+                                reason = %reason,
+                                "flush 一致性校验未通过——可能因进程崩溃导致跨表非原子写"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        table.load_merged(
+            merged,
+            self.prune_enabled,
+            if self.prune_enabled { latest_day } else { None },
+        )
     }
 }
 
@@ -769,6 +1044,52 @@ mod tests {
     }
 
     #[test]
+    fn same_day_terminal_rows_stay_until_next_day() {
+        let (dir, clock, store) = controllable_store(day_ms(2023, 11, 15, 10));
+        let table = store.table::<DoneWidget>();
+        table.insert(done_widget("done_today", 100)).unwrap();
+        store.flush().unwrap();
+        // 当日终态是当日快照的审计内容：内存与文件都保留到次日。
+        assert!(table.get("done_today").is_some());
+        let day1 = std::fs::read_to_string(dir.path().join("20231115/done_widget.csv")).unwrap();
+        assert!(day1.contains("done_today"));
+
+        clock.set(day_ms(2023, 11, 16, 10));
+        store.flush().unwrap();
+        // 归属日早于今天：内存裁掉，新日快照不再携带旧交易日终态。
+        assert_eq!(table.get("done_today"), None);
+        let day2 = std::fs::read_to_string(dir.path().join("20231116/done_widget.csv")).unwrap();
+        assert!(!day2.contains("done_today"));
+    }
+
+    #[test]
+    fn recover_same_day_restores_terminal_rows() {
+        let (dir, clock, store) = controllable_store(day_ms(2023, 11, 15, 10));
+        store
+            .table::<DoneWidget>()
+            .insert(done_widget("done_today", 100))
+            .unwrap();
+        store.flush().unwrap();
+
+        // 同日重启：最新日文件含当天终态，恢复后仍在内存（当天快照语义）。
+        let store2 = Store::new(
+            dir.path(),
+            Arc::new(AtomicClock(AtomicI64::new(day_ms(2023, 11, 15, 12)))),
+        );
+        assert_eq!(store2.recover::<DoneWidget>().unwrap(), 1);
+        assert!(store2.table::<DoneWidget>().get("done_today").is_some());
+
+        // 次日：该行被裁，最新日文件不再含它，恢复为空。
+        clock.set(day_ms(2023, 11, 16, 10));
+        store.flush().unwrap();
+        let store3 = Store::new(
+            dir.path(),
+            Arc::new(AtomicClock(AtomicI64::new(day_ms(2023, 11, 16, 12)))),
+        );
+        assert_eq!(store3.recover::<DoneWidget>().unwrap(), 0);
+    }
+
+    #[test]
     fn day_rollover_purges_prior_day_deleted_rows_from_memory() {
         let (dir, clock, store) = controllable_store(day_ms(2023, 11, 15, 23));
         let table = store.table::<Widget>();
@@ -848,12 +1169,12 @@ mod tests {
     // ---------- 覆盖率补盲：既有分支的表征测试 ----------
 
     /// 手工写一个日文件（五列齐全）。
-    fn write_day(base: &Path, day: &str, rec: CsvRecord) {
+    fn write_day(base: &Path, day: &str, rec: PersistRecord) {
         persist::write_day_csv(&base.join(day).join("widget.csv"), &[rec]).unwrap();
     }
 
     /// csv crate 编码一行（payload 含逗号/引号时正确转义）。
-    fn encode(r: &CsvRecord) -> String {
+    fn encode(r: &PersistRecord) -> String {
         let mut wtr = csv::WriterBuilder::new()
             .has_headers(false)
             .from_writer(Vec::new());
@@ -861,8 +1182,8 @@ mod tests {
         String::from_utf8(wtr.into_inner().unwrap()).unwrap()
     }
 
-    fn rec(id: &str, deleted: u8, created: i64, updated: i64, n: i64) -> CsvRecord {
-        CsvRecord {
+    fn rec(id: &str, deleted: u8, created: i64, updated: i64, n: i64) -> PersistRecord {
+        PersistRecord {
             id: id.to_string(),
             deleted,
             created_at_ms: created,
@@ -1152,7 +1473,7 @@ mod tests {
         write_day(
             dir.path(),
             "20231115",
-            CsvRecord {
+            PersistRecord {
                 id: "bad".into(),
                 deleted: 0,
                 created_at_ms: 1,
@@ -1333,7 +1654,7 @@ mod tests {
         content.push('\n');
         // 第一行完好（csv 正确转义）；第二行引号不闭合 → csv 宽松返回撕裂记录，
         // payload 不是合法 JSON → parse 跳过。
-        content.push_str(&encode(&CsvRecord {
+        content.push_str(&encode(&PersistRecord {
             id: "a".into(),
             deleted: 0,
             created_at_ms: 1,
