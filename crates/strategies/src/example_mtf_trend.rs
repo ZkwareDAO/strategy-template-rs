@@ -1,6 +1,6 @@
 //! example_mtf_trend — 多周期趋势教学策略（脚手架多周期样板）
 //!
-//! **教学要点**：`timeframes()` 多周期、跨周期 `closed_data`、ATR 初始止损、反转出场。
+//! **教学要点**：`timeframes()` 多周期、跨周期已闭合序列、ATR 初始止损、反转出场。
 //! 阅读顺序：`docs/strategy/EXAMPLES.md` 本文件章节 → 对照源码。
 //!
 //! ## 策略逻辑（对齐 Python example_mtf_trend 的三层条件）
@@ -11,14 +11,19 @@
 //!
 //! ## 多周期约定
 //! - `timeframes()` 返回 `[M1, H4, D1]`：1m 是引擎时钟（必须），H4 触发，D1 趋势
-//! - 读数据一律 `ctx.closed_data_min(tf, min_rows)`，每个周期独立做长度检查
+//! - 读数据一律 `s.closed.closed(tf)`，每个周期独立做长度检查
 //! - 指标全量重算：每次从完整已闭合序列算，不缓存增量
 
 use serde::Deserialize;
 
 use strategy_core::candle::Timeframe;
-use strategy_core::signal::{Action, Side};
-use strategy_core::strategy::{Ctx, Strategy};
+use strategy_core::signal::Side;
+use strategy_core::strategy::PositionView;
+use strategy_engine::bridge::CandleSeries;
+use strategy_engine::core::bar::Timeframe as EngineTimeframe;
+use strategy_engine::strategy::port::{
+    CrossSectionalStrategyPort, InstrumentAction, InstrumentSnapshot, PortfolioContext,
+};
 use strategy_indicators::talib;
 
 /// 1d 趋势层最少根数（EMA50 + 缓冲）
@@ -72,17 +77,23 @@ pub struct ExampleMtfTrend {
 
 impl ExampleMtfTrend {
     /// 1d 趋势过滤：Some(true)=允许做多，Some(false)=允许做空，None=数据不足
-    fn trend_allows_long(&self, ctx: &Ctx<'_>) -> Option<bool> {
-        let closed = ctx.closed_data_min(Timeframe::D1, MIN_ROWS_TREND)?;
-        let closes: Vec<f64> = closed.iter().map(|c| c.close).collect();
+    fn trend_allows_long(&self, closed: &CandleSeries) -> Option<bool> {
+        let d1 = closed.closed(Timeframe::D1)?;
+        if d1.len() < MIN_ROWS_TREND {
+            return None;
+        }
+        let closes: Vec<f64> = d1.iter().map(|c| c.close).collect();
         let ema = talib::ema(&closes, self.config.trend_ema_period).ok()?;
-        Some(closed.last()?.close > *ema.last()?)
+        Some(d1.last()?.close > *ema.last()?)
     }
 
     /// 4h 快慢线交叉事件：Some(true)=本根上穿，Some(false)=本根下穿，None=无交叉或数据不足
-    fn cross_signal(&self, ctx: &Ctx<'_>) -> Option<bool> {
-        let closed = ctx.closed_data_min(self.config.main_timeframe, MIN_ROWS_SIGNAL)?;
-        let closes: Vec<f64> = closed.iter().map(|c| c.close).collect();
+    fn cross_signal(&self, closed: &CandleSeries) -> Option<bool> {
+        let main = closed.closed(self.config.main_timeframe)?;
+        if main.len() < MIN_ROWS_SIGNAL {
+            return None;
+        }
+        let closes: Vec<f64> = main.iter().map(|c| c.close).collect();
         let fast = talib::ema(&closes, self.config.fast_period).ok()?;
         let slow = talib::ema(&closes, self.config.slow_period).ok()?;
         let n = fast.len().min(slow.len());
@@ -101,51 +112,45 @@ impl ExampleMtfTrend {
     }
 
     /// 4h ATR（初始止损距离基准）
-    fn atr(&self, ctx: &Ctx<'_>) -> Option<f64> {
-        let closed = ctx.closed_data_min(self.config.main_timeframe, MIN_ROWS_SIGNAL)?;
-        let highs: Vec<f64> = closed.iter().map(|c| c.high).collect();
-        let lows: Vec<f64> = closed.iter().map(|c| c.low).collect();
-        let closes: Vec<f64> = closed.iter().map(|c| c.close).collect();
+    fn atr(&self, closed: &CandleSeries) -> Option<f64> {
+        let main = closed.closed(self.config.main_timeframe)?;
+        if main.len() < MIN_ROWS_SIGNAL {
+            return None;
+        }
+        let highs: Vec<f64> = main.iter().map(|c| c.high).collect();
+        let lows: Vec<f64> = main.iter().map(|c| c.low).collect();
+        let closes: Vec<f64> = main.iter().map(|c| c.close).collect();
         let atr = talib::atr(&highs, &lows, &closes, self.config.atr_period).ok()?;
         atr.last().copied()
     }
-}
-
-impl Strategy for ExampleMtfTrend {
-    fn strategy_type(&self) -> &str {
-        "example_mtf_trend"
-    }
-
-    fn timeframes(&self) -> Vec<Timeframe> {
-        vec![Timeframe::M1, self.config.main_timeframe, Timeframe::D1]
-    }
 
     /// 入场：1d 趋势过滤 + 4h 均线交叉触发 + ATR 初始止损
-    fn on_candle(&mut self, ctx: &Ctx<'_>) -> Vec<Action> {
-        if ctx.in_stop_loss_cooldown() {
-            return vec![];
+    fn entry_action(&self, s: &InstrumentSnapshot, closed: &CandleSeries) -> Option<InstrumentAction> {
+        if s.in_stop_loss_cooldown() {
+            return None;
         }
         let (Some(trend_up), Some(cross_up), Some(atr)) = (
-            self.trend_allows_long(ctx),
-            self.cross_signal(ctx),
-            self.atr(ctx),
+            self.trend_allows_long(closed),
+            self.cross_signal(closed),
+            self.atr(closed),
         ) else {
-            return vec![];
+            return None;
         };
         let side = if cross_up && trend_up {
             Side::Long
         } else if !cross_up && !trend_up {
             Side::Short
         } else {
-            return vec![]; // 趋势与信号冲突或无交叉事件：保持空仓
+            return None; // 趋势与信号冲突或无交叉事件：保持空仓
         };
-        let price = ctx.current_candle.close;
+        let price = s.bar.close;
         let dist = self.config.atr_stop_mult * atr;
         let stop_price = match side {
             Side::Long => price - dist,
             Side::Short => price + dist,
         };
-        vec![Action::Open {
+        Some(InstrumentAction::Open {
+            instrument: s.instrument.clone(),
             side,
             price,
             stop_price,
@@ -158,15 +163,17 @@ impl Strategy for ExampleMtfTrend {
                 self.config.slow_period,
                 if cross_up { "金叉" } else { "死叉" }
             ),
-        }]
+        })
     }
 
     /// 出场：硬止损 或 4h 反向交叉
-    fn on_realtime_tick(&mut self, ctx: &Ctx<'_>) -> Vec<Action> {
-        let Some(pos) = ctx.position else {
-            return vec![];
-        };
-        let price = ctx.current_candle.close;
+    fn exit_action(
+        &self,
+        s: &InstrumentSnapshot,
+        closed: &CandleSeries,
+        pos: &PositionView,
+    ) -> Option<InstrumentAction> {
+        let price = s.bar.close;
 
         // ① 硬止损
         let hit = match pos.side {
@@ -174,30 +181,65 @@ impl Strategy for ExampleMtfTrend {
             Side::Short => price >= pos.stop_price,
         };
         if hit {
-            return vec![Action::Close {
+            return Some(InstrumentAction::Close {
+                instrument: s.instrument.clone(),
                 price,
                 reason: "ATR 止损触发".into(),
                 is_stop_loss: true,
                 strength: 1.0,
-            }];
+            });
         }
 
         // ② 4h 反向交叉事件 → 趋势离场
-        if let Some(cross_up) = self.cross_signal(ctx) {
-            let against = match pos.side {
-                Side::Long => !cross_up,
-                Side::Short => cross_up,
+        let cross_up = self.cross_signal(closed)?;
+        let against = match pos.side {
+            Side::Long => !cross_up,
+            Side::Short => cross_up,
+        };
+        against.then(|| InstrumentAction::Close {
+            instrument: s.instrument.clone(),
+            price,
+            reason: "4h 均线反向交叉".into(),
+            is_stop_loss: false,
+            strength: 1.0,
+        })
+    }
+}
+
+impl CrossSectionalStrategyPort for ExampleMtfTrend {
+    fn strategy_type(&self) -> &str {
+        "example_mtf_trend"
+    }
+
+    fn timeframes(&self) -> Vec<EngineTimeframe> {
+        vec![
+            EngineTimeframe::M1,
+            EngineTimeframe::from(self.config.main_timeframe),
+            EngineTimeframe::from(Timeframe::D1),
+        ]
+    }
+
+    /// 逐快照决策；缺失已闭合序列或数据不足的标的保持沉默。
+    fn on_cross_section_bars(
+        &mut self,
+        _newly_closed: &[EngineTimeframe],
+        snapshots: &[InstrumentSnapshot],
+        _portfolio: &PortfolioContext,
+    ) -> Vec<InstrumentAction> {
+        let mut out = Vec::new();
+        for s in snapshots {
+            let Some(closed) = s.closed.as_ref() else {
+                continue;
             };
-            if against {
-                return vec![Action::Close {
-                    price,
-                    reason: "4h 均线反向交叉".into(),
-                    is_stop_loss: false,
-                    strength: 1.0,
-                }];
+            let action = match s.position {
+                None => self.entry_action(s, closed),
+                Some(pos) => self.exit_action(s, closed, &pos),
+            };
+            if let Some(a) = action {
+                out.push(a);
             }
         }
-        vec![]
+        out
     }
 }
 
@@ -222,24 +264,25 @@ crate::register_strategy! {
 
 #[cfg(test)]
 mod tests {
-    use strategy_core::candle::{Candle, Timeframe};
-    use strategy_core::signal::{Action, Side};
-    use strategy_core::strategy::{ClosedSource, Ctx, PositionView, Strategy};
-
     use super::*;
+    use chrono::{NaiveDate, TimeZone, Utc};
+    use strategy_core::candle::Candle;
+    use strategy_engine::core::bar::{Bar, BarExtensions, BarFinality};
+    use strategy_engine::core::identity::{ExchangeId, InstrumentId};
+    use strategy_engine::core::session::TradingDay;
+    use strategy_engine::strategy::features::FeatureMap;
 
-    /// 多周期已闭合数据源：分别喂 1d 与 4h 序列
-    struct FakeMtfSource {
-        d1_closes: Vec<f64>,
-        h4_closes: Vec<f64>,
+    fn inst(symbol: &str) -> InstrumentId {
+        InstrumentId::perpetual(&ExchangeId::new("binance"), symbol)
     }
 
+    /// 带振幅的 K 线：保证 ATR > 0（止损距离非零才可断言止损在上/下方）。
     fn make_candle(close: f64) -> Candle {
         Candle {
-            open_time: chrono::Utc::now(),
+            open_time: Utc.with_ymd_and_hms(2026, 1, 5, 0, 0, 0).unwrap(),
             open: close,
-            high: close,
-            low: close,
+            high: close + 1.0,
+            low: close - 1.0,
             close,
             volume: 0.0,
             quote_volume: 0.0,
@@ -250,22 +293,86 @@ mod tests {
         }
     }
 
-    fn make_candles(closes: &[f64]) -> Vec<Candle> {
-        closes.iter().map(|&c| make_candle(c)).collect()
+    /// 已闭合序列：M1 用末值，主周期与 D1 各插一个桶。
+    fn series(main_closes: &[f64], d1_closes: &[f64]) -> CandleSeries {
+        let last = main_closes.last().copied().unwrap_or(0.0);
+        let mut out = CandleSeries::from_closed(Timeframe::M1, vec![make_candle(last)]);
+        out.insert_closed(
+            Timeframe::H4,
+            main_closes.iter().map(|&c| make_candle(c)).collect(),
+        );
+        out.insert_closed(
+            Timeframe::D1,
+            d1_closes.iter().map(|&c| make_candle(c)).collect(),
+        );
+        out
     }
 
-    impl ClosedSource for FakeMtfSource {
-        fn closed(&self, tf: Timeframe) -> Option<&[Candle]> {
-            // Box::leak 是测试专用：让 &'a [Candle] 活得够久
-            match tf {
-                Timeframe::D1 => Some(Box::leak(make_candles(&self.d1_closes).into_boxed_slice())),
-                Timeframe::H4 => Some(Box::leak(make_candles(&self.h4_closes).into_boxed_slice())),
-                _ => None,
-            }
+    fn bar(symbol: &str, close: f64) -> Bar {
+        Bar {
+            instrument: inst(symbol),
+            open_time: Utc.with_ymd_and_hms(2026, 1, 5, 0, 0, 0).unwrap(),
+            open: close,
+            high: close,
+            low: close,
+            close,
+            volume: 0.0,
+            finality: BarFinality::Final,
+            extensions: BarExtensions::default(),
         }
-        fn last_price(&self) -> Option<f64> {
-            self.h4_closes.last().copied()
+    }
+
+    fn snapshot(
+        symbol: &str,
+        closed: Option<CandleSeries>,
+        position: Option<PositionView>,
+        close: f64,
+    ) -> InstrumentSnapshot {
+        InstrumentSnapshot {
+            instrument: inst(symbol),
+            bar: bar(symbol, close),
+            position,
+            stale: false,
+            features: FeatureMap::default(),
+            entry_eligible: true,
+            entry_reason: None,
+            exit_triggered: None,
+            trading_day: TradingDay(NaiveDate::from_ymd_opt(2026, 1, 5).unwrap()),
+            no_trade: false,
+            entry_confirm: true,
+            signal_resume: false,
+            cooldown: None,
+            session_open_price: None,
+            closed,
         }
+    }
+
+    fn portfolio() -> PortfolioContext {
+        PortfolioContext {
+            strategy_id: "example_mtf_trend:default".into(),
+            nav: 1000.0,
+            drawdown: 0.0,
+            portfolio_pnl_pct: 0.0,
+            sub_positions: Vec::new(),
+            master: None,
+            multipliers: Default::default(),
+            max_total_notional: 1.0,
+            rebalance_due: false,
+            no_trade: false,
+        }
+    }
+
+    fn long_position(stop_price: f64) -> Option<PositionView> {
+        Some(PositionView {
+            side: Side::Long,
+            entry_price: 100.0,
+            stop_price,
+            peak_price: 105.0,
+            max_pnl_pct: 5.0,
+            min_pnl_pct: -2.0,
+            exit_active: false,
+            exit_price: 0.0,
+        })
     }
 
     fn strat() -> ExampleMtfTrend {
@@ -281,126 +388,159 @@ mod tests {
         }
     }
 
-    /// 1d 上升趋势 + 4h 末根上穿 → 开多
+    fn run(snaps: &[InstrumentSnapshot]) -> Vec<InstrumentAction> {
+        strat().on_cross_section_bars(&[EngineTimeframe::M1], snaps, &portfolio())
+    }
+
+    /// 上升的 D1 序列（末值高于 EMA → 允许做多）。
+    fn rising_d1() -> Vec<f64> {
+        (0..80).map(|i| 100.0 + i as f64).collect()
+    }
+
+    /// 下降的 D1 序列（末值低于 EMA → 允许做空）。
+    fn falling_d1() -> Vec<f64> {
+        (0..80).map(|i| 180.0 - i as f64).collect()
+    }
+
+    /// 4h 走平 + 末根跳升 → 金叉。
+    fn gold_cross_main() -> Vec<f64> {
+        let mut closes: Vec<f64> = vec![100.0; 60];
+        closes.push(120.0);
+        closes
+    }
+
     #[test]
-    fn uptrend_and_golden_cross_opens_long() {
-        let d1: Vec<f64> = (0..80).map(|i| 100.0 + i as f64).collect(); // 趋势向上
-        let mut h4: Vec<f64> = vec![100.0; 80]; // 4h 走平（无交叉）
-        h4.push(120.0); // 末根跳升 → 上穿
-        let src = FakeMtfSource { d1_closes: d1, h4_closes: h4 };
-        let ctx = Ctx::new(&src, 120.0, make_candle(120.0), chrono::Utc::now(), None, None);
-        let actions = strat().on_candle(&ctx);
-        assert_eq!(actions.len(), 1, "4h 上穿事件应开多，实际: {actions:?}");
+    fn trend_and_gold_cross_opens_long_with_atr_stop_below() {
+        let snaps = [snapshot(
+            "BTCUSDT",
+            Some(series(&gold_cross_main(), &rising_d1())),
+            None,
+            120.0,
+        )];
+        let actions = run(&snaps);
+        assert_eq!(actions.len(), 1, "趋势向上 + 金叉应开多，实际: {actions:?}");
         match &actions[0] {
-            Action::Open { side, stop_price, price, .. } => {
+            InstrumentAction::Open {
+                instrument,
+                side,
+                stop_price,
+                price,
+                atr,
+                reason,
+                ..
+            } => {
+                assert_eq!(
+                    instrument.namespaced_key(),
+                    "binance/crypto_perpetual/BTCUSDT"
+                );
                 assert_eq!(*side, Side::Long);
-                assert!(*stop_price < *price, "多头止损应在入场价下方");
+                assert!(*atr > 0.0, "ATR 必须为正");
+                assert!(stop_price < price, "多头止损应在入场价下方");
+                assert!(reason.contains("金叉"), "入场原因: {reason}");
             }
             a => panic!("应开多，实际: {a:?}"),
         }
     }
 
-    /// 1d 下降趋势 + 4h 末根下穿 → 开空
+    /// 趋势与信号冲突（D1 向下 + 4h 金叉）→ 保持空仓
     #[test]
-    fn downtrend_and_death_cross_opens_short() {
-        let d1: Vec<f64> = (0..80).map(|i| 200.0 - i as f64).collect(); // 趋势向下
-        let mut h4: Vec<f64> = vec![100.0; 80]; // 4h 走平
-        h4.push(80.0); // 末根跳降 → 下穿
-        let src = FakeMtfSource { d1_closes: d1, h4_closes: h4 };
-        let ctx = Ctx::new(&src, 80.0, make_candle(80.0), chrono::Utc::now(), None, None);
-        let actions = strat().on_candle(&ctx);
-        assert_eq!(actions.len(), 1, "4h 下穿事件应开空，实际: {actions:?}");
+    fn trend_signal_conflict_is_silent() {
+        let snaps = [snapshot(
+            "BTCUSDT",
+            Some(series(&gold_cross_main(), &falling_d1())),
+            None,
+            120.0,
+        )];
+        assert!(run(&snaps).is_empty(), "趋势与信号冲突时不应开仓");
+    }
+
+    #[test]
+    fn insufficient_data_is_silent() {
+        let main: Vec<f64> = (0..20).map(|i| 100.0 + i as f64).collect();
+        let d1: Vec<f64> = (0..20).map(|i| 100.0 + i as f64).collect();
+        let snaps = [snapshot("BTCUSDT", Some(series(&main, &d1)), None, 119.0)];
+        assert!(run(&snaps).is_empty(), "任一周期数据不足应保持沉默");
+    }
+
+    #[test]
+    fn stop_hit_closes_position() {
+        // 多头 stop=98，1m close=95 → 止损离场（不需要 D1/4h 数据也生效）
+        let snaps = [snapshot(
+            "BTCUSDT",
+            Some(series(&gold_cross_main(), &rising_d1())),
+            long_position(98.0),
+            95.0,
+        )];
+        let actions = run(&snaps);
+        assert_eq!(actions.len(), 1);
         match &actions[0] {
-            Action::Open { side, stop_price, price, .. } => {
-                assert_eq!(*side, Side::Short);
-                assert!(*stop_price > *price, "空头止损应在入场价上方");
+            InstrumentAction::Close {
+                is_stop_loss,
+                reason,
+                ..
+            } => {
+                assert!(*is_stop_loss);
+                assert_eq!(reason, "ATR 止损触发");
             }
-            a => panic!("应开空，实际: {a:?}"),
+            a => panic!("应止损平仓，实际: {a:?}"),
         }
     }
 
-    /// 1d 下降（不允许做多）但 4h 上升（金叉）→ 不开仓
+    /// 缺失已闭合序列（引擎未提供封闭桶）→ 策略保持沉默而不是 panic。
     #[test]
-    fn trend_conflict_stays_flat() {
-        let d1: Vec<f64> = (0..80).map(|i| 200.0 - i as f64).collect();
-        let h4: Vec<f64> = (0..80).map(|i| 100.0 + i as f64).collect();
-        let src = FakeMtfSource { d1_closes: d1, h4_closes: h4 };
-        let ctx = Ctx::new(&src, 179.0, make_candle(179.0), chrono::Utc::now(), None, None);
-        assert!(strat().on_candle(&ctx).is_empty(), "趋势与信号冲突应保持空仓");
+    fn missing_closed_series_is_silent() {
+        let snaps = [snapshot("BTCUSDT", None, None, 199.0)];
+        assert!(run(&snaps).is_empty());
     }
 
-    /// 任一周期数据不足 → 静默不入场（不能 panic）
+    /// 4h 反向死叉出场：多头持仓遇下穿事件 → 平仓（非止损）
     #[test]
-    fn insufficient_data_is_silent() {
-        let d1: Vec<f64> = (0..10).map(|i| 100.0 + i as f64).collect();
-        let h4: Vec<f64> = (0..80).map(|i| 100.0 + i as f64).collect();
-        let src = FakeMtfSource { d1_closes: d1, h4_closes: h4 };
-        let ctx = Ctx::new(&src, 109.0, make_candle(109.0), chrono::Utc::now(), None, None);
-        assert!(strat().on_candle(&ctx).is_empty());
-    }
-
-    /// 持仓中 4h 反向交叉事件 → 平仓（非止损）
-    /// 夹具：145 在止损 140 上方（避免硬止损先触发）；4h 末根跳降产生下穿事件
-    #[test]
-    fn reverse_cross_exits_position() {
-        let d1: Vec<f64> = (0..80).map(|i| 100.0 + i as f64).collect();
-        let mut h4: Vec<f64> = vec![100.0; 80];
-        h4.push(80.0); // 末根跳降 → 下穿（多头持仓的反向信号）
-        let src = FakeMtfSource { d1_closes: d1, h4_closes: h4 };
-        let pos = PositionView {
-            side: Side::Long,
-            entry_price: 150.0,
-            stop_price: 140.0,
-            peak_price: 160.0,
-            max_pnl_pct: 6.0,
-            min_pnl_pct: -1.0,
-            exit_active: false,
-            exit_price: 0.0,
-        };
-        let ctx = Ctx::new(&src, 145.0, make_candle(145.0), chrono::Utc::now(), Some(pos), None);
-        let actions = strat().on_realtime_tick(&ctx);
+    fn reverse_cross_exits_long_position() {
+        let mut main: Vec<f64> = vec![100.0; 60];
+        main.push(80.0); // 死叉
+        let snaps = [snapshot(
+            "BTCUSDT",
+            Some(series(&main, &rising_d1())),
+            long_position(95.0),
+            98.0,
+        )];
+        let actions = run(&snaps);
         assert_eq!(actions.len(), 1);
         match &actions[0] {
-            Action::Close { is_stop_loss, .. } => assert!(!is_stop_loss, "反转离场不是止损"),
+            InstrumentAction::Close {
+                is_stop_loss,
+                reason,
+                ..
+            } => {
+                assert!(!is_stop_loss, "反转离场不是止损");
+                assert!(reason.contains("反向交叉"), "离场原因: {reason}");
+            }
             a => panic!("应平仓，实际: {a:?}"),
         }
     }
 
-    /// H4 数据不足（D1 足够）→ 静默不入场
+    /// 同一份代码接受多个快照：增加 universe 行即从单标升级为横截面。
     #[test]
-    fn h4_insufficient_data_is_silent() {
-        let d1: Vec<f64> = (0..80).map(|i| 100.0 + i as f64).collect(); // 足够
-        let h4: Vec<f64> = (0..10).map(|i| 100.0 + i as f64).collect(); // 不足 40
-        let src = FakeMtfSource { d1_closes: d1, h4_closes: h4 };
-        let ctx = Ctx::new(&src, 109.0, make_candle(109.0), chrono::Utc::now(), None, None);
-        assert!(strat().on_candle(&ctx).is_empty(), "H4 数据不足应保持沉默");
-    }
-
-    /// 硬止损出场：多头持仓价格跌破 stop_price → is_stop_loss=true
-    #[test]
-    fn hard_stop_exits_with_stop_loss_flag() {
-        let d1: Vec<f64> = (0..80).map(|i| 100.0 + i as f64).collect();
-        let h4: Vec<f64> = (0..80).map(|i| 100.0 + i as f64).collect();
-        let src = FakeMtfSource { d1_closes: d1, h4_closes: h4 };
-        let pos = PositionView {
-            side: Side::Long,
-            entry_price: 150.0,
-            stop_price: 140.0,
-            peak_price: 160.0,
-            max_pnl_pct: 6.0,
-            min_pnl_pct: -2.0,
-            exit_active: false,
-            exit_price: 0.0,
-        };
-        let ctx = Ctx::new(&src, 135.0, make_candle(135.0), chrono::Utc::now(), Some(pos), None);
-        let actions = strat().on_realtime_tick(&ctx);
-        assert_eq!(actions.len(), 1);
-        match &actions[0] {
-            Action::Close { is_stop_loss, reason, .. } => {
-                assert!(*is_stop_loss, "硬止损应标记 is_stop_loss=true");
-                assert!(reason.contains("止损"), "离场原因应含止损: {reason}");
-            }
-            a => panic!("应止损平仓，实际: {a:?}"),
-        }
+    fn multiple_snapshots_emit_actions_per_instrument() {
+        let snaps = [
+            snapshot(
+                "BTCUSDT",
+                Some(series(&gold_cross_main(), &rising_d1())),
+                None,
+                120.0,
+            ),
+            snapshot(
+                "ETHUSDT",
+                Some(series(&gold_cross_main(), &rising_d1())),
+                None,
+                120.0,
+            ),
+        ];
+        let actions = run(&snaps);
+        assert_eq!(
+            actions.len(),
+            2,
+            "两个标的金叉 → 两个开仓动作: {actions:?}"
+        );
     }
 }

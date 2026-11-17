@@ -25,6 +25,19 @@ impl std::fmt::Display for Side {
     }
 }
 
+/// 精确数量递减：剩余 raw − 本笔成交 raw（Decimal 精确运算，无 f64 往返）。
+/// raw 缺失或解析失败时返回 None（调用方保留原 raw，不写入错误值）。
+///
+/// v2.2（§16 C7）：从 `PositionManager::subtract_raw` 原样提为公共函数——
+/// `remaining_size_raw` 是平仓帧数量的真正来源，这条精确递减口径需要
+/// **唯一实现**；SPI（engine）与 manager 共用本函数，不复制公式。
+pub fn subtract_qty_raw(remaining_raw: Option<&str>, closed_raw: &str) -> Option<String> {
+    use std::str::FromStr;
+    let rem = rust_decimal::Decimal::from_str(remaining_raw?).ok()?;
+    let closed = rust_decimal::Decimal::from_str(closed_raw).ok()?;
+    Some(format!("{}", rem - closed))
+}
+
 /// 当前仓位状态（统一 Store `position` 行的 payload）
 ///
 /// 红线对齐：禁止缓存字段进入持久化（这里全部是有状态恢复语义的字段）。
@@ -46,6 +59,10 @@ pub struct PositionState {
     pub max_pnl_pct: f64,
     /// 最大亏损百分比（<0）
     pub min_pnl_pct: f64,
+    /// 归属策略实例（`{strategy_type}:{instance_id}`）。旧链不填 = None；
+    /// 横截面/组合链写 `strategy_id` 以便 Store 按策略归集。
+    #[serde(default)]
+    pub strategy_id: Option<String>,
     /// 入场时 ATR（历史仓位记录用）
     #[serde(default)]
     pub atr_at_entry: f64,
@@ -146,6 +163,7 @@ mod tests {
             stop_price: entry * 0.98,
             max_pnl_pct: 0.0,
             min_pnl_pct: 0.0,
+            strategy_id: None,
             atr_at_entry: 0.0,
             total_size: 0.0,
             remaining_size: 0.0,
@@ -206,5 +224,27 @@ mod tests {
         s.on_price(99.0, 97.0); // low=97 → pnl_max=+3%
         assert_eq!(s.peak_price, 97.0); // short 峰值 = 最低价
         assert!((s.max_pnl_pct - 3.0).abs() < 1e-9); // 97 时 +3%
+    }
+
+    #[test]
+    fn strategy_id_defaults_when_missing_in_old_snapshot() {
+        let json = serde_json::json!({
+            "position_id": "sig_x", "symbol": "BTCUSDT", "side": "Long",
+            "entry_price": 100.0,
+            "entry_time": "2026-06-10T00:00:00Z", "entry_timestamp": 0,
+            "peak_price": 100.0, "stop_price": 98.0,
+            "max_pnl_pct": 0.0, "min_pnl_pct": 0.0
+        });
+        let s: PositionState = serde_json::from_value(json).unwrap();
+        assert_eq!(s.strategy_id, None, "旧快照无 strategy_id，必须默认 None");
+    }
+
+    #[test]
+    fn strategy_id_roundtrips_through_json() {
+        let mut s = long_state(100.0);
+        s.strategy_id = Some("xsec_momentum:default".into());
+        let back: PositionState =
+            serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+        assert_eq!(back.strategy_id.as_deref(), Some("xsec_momentum:default"));
     }
 }

@@ -62,7 +62,7 @@ where
 }
 
 /// 外部只读反查：服务端/旁路持进程共享 [`Store`] 直接读某策略实例的**当前持仓
-/// 快照**，不经 RuntimeActor 通道、不发任何消息（docs/archive/strategy-rs.md
+/// 快照**，不经 actor 命令通道、不发任何消息（docs/archive/strategy-rs.md
 /// 「服务端也可通过连接查询策略仓位」的数据面）。
 ///
 /// 返回克隆值（每实例至多 1 行未删除持仓），行 Mutex 不外泄；平仓软删行由
@@ -261,6 +261,7 @@ impl PositionManager {
             stop_price,
             max_pnl_pct: 0.0,
             min_pnl_pct: 0.0,
+            strategy_id: None,
             atr_at_entry,
             total_size: 0.0,
             remaining_size: 0.0,
@@ -299,6 +300,7 @@ impl PositionManager {
             stop_price,
             max_pnl_pct: 0.0,
             min_pnl_pct: 0.0,
+            strategy_id: None,
             atr_at_entry,
             total_size: fill.filled_size,
             remaining_size: fill.filled_size,
@@ -376,10 +378,7 @@ impl PositionManager {
     /// 精确数量递减：剩余 raw − 本笔成交 raw（Decimal 精确运算，无 f64 往返）。
     /// raw 缺失或解析失败时返回 None（调用方保留原 raw，不写入错误值）。
     fn subtract_raw(remaining_raw: Option<&str>, closed_raw: &str) -> Option<String> {
-        use std::str::FromStr;
-        let rem = rust_decimal::Decimal::from_str(remaining_raw?).ok()?;
-        let closed = rust_decimal::Decimal::from_str(closed_raw).ok()?;
-        Some(format!("{}", rem - closed))
+        crate::state::subtract_qty_raw(remaining_raw, closed_raw)
     }
 
     /// 部分平仓：在 history 表写/更新累计进度行（id=position_id）。
@@ -602,26 +601,6 @@ impl PositionManager {
             exit_active, exit_price,
             "仓位状态：SAR 离场状态已更新（position 行同步）"
         );
-        Ok(())
-    }
-
-    /// 更新回落止盈持仓级状态（统一风控激活/刷新触发线时调用）。
-    /// 无仓位时为 no-op。
-    pub fn update_trail_state(
-        &mut self,
-        trail_activated: bool,
-        trail_trigger_pct: f64,
-    ) -> std::io::Result<()> {
-        let Some(current) = self.current_row() else {
-            return Ok(());
-        };
-        self.positions
-            .with(&current.state.position_id, |r| {
-                r.state.trail_activated = trail_activated;
-                r.state.trail_trigger_pct = trail_trigger_pct;
-                r.version += 1;
-            })
-            .expect("持仓行刚读取存在");
         Ok(())
     }
 

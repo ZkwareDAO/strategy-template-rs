@@ -108,6 +108,9 @@ pub struct OrderSnapshot {
     pub filled_quantity_raw: Option<String>,
     /// 实际委托要素（审计核对"真实下了什么单"）
     pub place: Option<OrderPlace>,
+    /// 真实手续费（阶段 4 v2.7，§13-4「FillEvent.fee 不再恒 0」）：
+    /// get_order/order 帧回传；None = 服务端未升级/未回传（旧行为 0 兜底）。
+    pub fee: Option<f64>,
 }
 
 /// 已就绪的成交（同步回测：submit 即成交；live 恒空——成交走 order_update 流）

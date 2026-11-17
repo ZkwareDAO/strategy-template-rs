@@ -22,4 +22,4 @@ pub mod state;
 
 pub use history::{HistoryPosition, HistoryPositionLogger};
 pub use manager::{list_positions, Cooldown, ManagedPosition, ManagedStop, PositionManager};
-pub use state::{PositionState, Side};
+pub use state::{subtract_qty_raw, PositionState, Side};
