@@ -1,10 +1,18 @@
 strategy_name: example_mtf_trend
 rust_module: example_mtf_trend
 prefix: EXAMPLEMTFTREND
+market: crypto
 direction: neutral
 timeframes: [4h]
 extra_timeframes: [1d]
 symbols: [BTCUSDT]
+data_source:
+  dir: data/klines
+  note: "crypto 默认 data/klines/1m/binance/crypto_perpetual/BTCUSDT_1m.csv"
+backtest:
+  start: "20260801"
+  end: "20260826"
+  initial_cash: 10000
 
 entry:
   description: "1d 趋势过滤 + 4h 均线交叉触发"
@@ -28,4 +36,4 @@ default_params:
   atr_stop_mult: 2.0
 
 config_files:
-  - config/example_mtf_trend/example.yaml
+  - config/example_mtf_trend/strategy.yaml   # crypto（BTCUSDT/binance）

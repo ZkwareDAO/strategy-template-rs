@@ -1,0 +1,38 @@
+strategy_name: futures_single_trend
+rust_module: futures_single_trend
+prefix: FUTURESSINGLETREND
+market: futures
+direction: neutral
+timeframes: [15m]
+extra_timeframes: [1h]
+symbols: [CU]
+data_source:
+  dir: data/klines
+  note: "期货数据必须由用户提供；目标路径 data/klines/1m/SHFE/cn_futures/CU_1m.csv（roll_build 生成）"
+backtest:
+  start: "20260101"
+  end: "20260630"
+  initial_cash: 1000000
+
+entry:
+  description: "15m 触发 + 1h 趋势过滤，顺势开多/开空"
+  conditions:
+    - "base 15m 收盘价上穿 EMA(trigger_ema=60) 且 1h 收盘价 > EMA(trend_ema=60) → 开多"
+    - "base 15m 收盘价下穿 EMA(trigger_ema=60) 且 1h 收盘价 < EMA(trend_ema=60) → 开空"
+    - "entry_eligible 且 !stale；ATR(14) 可用"
+
+exit:
+  stop_loss: "入场价 ∓ atr_stop_mult(2.0) × ATR(14, 15m)"
+  trailing_stop: ""
+  signal_reversal: "1h 趋势层反转或 15m 触发线反向 → 平仓"
+  note: "策略按已闭合 bar 自检 position.stop_price；配置 portfolio_exit.stop_loss_pct=8 兜底"
+
+default_params:
+  trigger_ema: 60
+  trend_ema: 60
+  trend_tf: "1h"
+  atr_period: 14
+  atr_stop_mult: 2.0
+
+config_files:
+  - config/ctp_single_cu/strategy.yaml

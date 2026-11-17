@@ -16,12 +16,11 @@
 #
 # 结构（deny_unknown_fields：字段拼错启动即报错，以 config.rs 为唯一事实源）：
 # services:
-#   kline:                          # 行情服务（REST 回填 + WS 实时订阅）
-#     backfill_url: <URL>           # 历史 K线 REST 回填端点（缺数据时自动补齐）
-#     ws_url: <WS-URL>              # 实时 K线 WS 订阅端点
-#     reconnect_backoff_max_secs: <u64>   # 断线重连退避上限（秒）
-#   trading:                        # 交易服务（下单 / 回报 / 仓位）
-#     ws_url: <WS-URL>              # 交易服务 WS 端点（三通道：鉴权/事件/请求）
+#   trading:                        # 唯一外部服务：下单/回报/仓位 + K线
+#     ws_url: <WS-URL>              # 交易 WS 端点（鉴权/事件/请求/K线订阅四道合一；
+#                                   # K线 = subscribe_kline 定稿推送 kline_1m_batch，
+#                                   # 历史回填 = get_klines；契约 contracts/trading-service.md §8。
+#                                   # klines-service 已退役：写了 services.kline 节 run 即拒启）
 #     request_timeout_ms: <u64>     # 请求超时（毫秒）
 #     submit_enabled: <bool>        # 下单总开关（false 本地拦截；与 mode=live 双保险）
 #     reconnect_backoff_max_secs: <u64>
@@ -31,10 +30,6 @@
 #
 # 以下为填写示例（端点为占位，部署时替换为用户自己的服务地址）：
 services:
-  kline:
-    backfill_url: https://your-kline-service.example.com
-    ws_url: wss://your-kline-service.example.com/ws/klines
-    reconnect_backoff_max_secs: 120
   trading:
     ws_url: wss://trading.your-domain.example.com/ws
     request_timeout_ms: 5000
@@ -43,3 +38,51 @@ services:
     strategy_secret: "REPLACE_WITH_LOCAL_SOUTH_KEY_64_HEX"
     exchange: binance
     account: your_account
+
+# ── 期货（CTP）接入补充 ────────────────────────────────────────
+# 合约参数：config/contracts.yaml（或 _contracts.yaml）会被自动加载，
+#   键为品种码（如 CU）；字段：multiplier/tick_size/margin_rate/min_lots/
+#   commission(open/close/close_today)/session_opens/session_closes/
+#   no_trade_after_open_minutes/no_trade_before_close_minutes。
+#   未声明的 symbol 走 crypto 兼容口径（小数数量 + fee_rate）。
+# 行情形态：K线统一经 trading-service 连接订阅（协议 §10）：实时=定稿 `kline_1m_batch`
+#   推送；历史/补缺=`get_klines`（读服务端本地留存）。CTP 支持品种前缀订阅
+#   （如 cu），服务端只推当前主力合约、换月随帧内 symbol 自然变化——扇出按
+#   具体合约名订阅时留意订阅名与帧内 symbol 口径（策略端已加 warn+计数告警）。
+# bar_merge：**已废弃**的历史字段（旧 data::Feed 聚合开关）。统一引擎的聚合规则
+# 由交易所 SPI 提供（crypto=utc_grid / 期货=session_window + contracts.yaml 时段）。
+# 写了不报错也不生效，加载时告警一次；存量 yaml 可安全删除该行。
+
+# ── 阶段 2（Exchange SPI）：按交易所分组混跑（docs/exchange-spi-design.md §8） ──
+# 与旧 symbols 链路并存；装配入口 config::build_exchange_registry + resolve_instruments。
+# 未声明 exchanges: 的旧配置行为完全不变。
+# exchanges:
+#   binance:
+#     market: crypto_perpetual
+#     aggregation: utc_grid
+#     fee_rate: 0.0004
+#     symbols: [BTCUSDT, ETHUSDT]
+#   ctp:
+#     id: SHFE                          # 场所 id；实例名 ctp 供 instruments 引用
+#     aggregation: session_window
+#     session:                          # 全所默认时段表（缺省 = 境内期货基线）
+#       timezone_offset_hours: 8
+#       day_cutover: "20:00"
+#       windows:
+#         - { open: "09:00", close: "10:15", kind: day }
+#         - { open: "10:30", close: "11:30", kind: day }
+#         - { open: "13:30", close: "15:00", kind: day }
+#         - { open: "21:00", close: "01:00", kind: night }
+#     sessions:                         # per-product 覆盖（C2；AU 夜盘 02:30）
+#       AU:
+#         windows:
+#           - { open: "21:00", close: "02:30", kind: night }
+#     contracts:                        # 品种级规格（contracts.yaml 同构；C13 回落）
+#       CU: { multiplier: 5, tick_size: 10, margin_rate: 0.11, min_lots: 1,
+#             commission: { mode: rate, open: 0.00005, close: 0.00005, close_today: 0.0001 } }
+#     subscription:                     # 选主（快照 + 真实时钟口径，阶段 3 接入）
+#       policy: open_interest
+#       include_second_main: true
+# instruments:                          # 单进程混跑清单
+#   - { exchange: binance, product: BTCUSDT, strategy: example_dual_ma }
+#   - { exchange: ctp, product: CU, role: main, strategy: example_dual_ma }

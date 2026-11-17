@@ -1,9 +1,17 @@
 strategy_name: example_dual_ma
 rust_module: example_dual_ma
 prefix: EXAMPLEDUALMA
+market: crypto
 direction: neutral
 timeframes: [4h]
 symbols: [BTCUSDT]
+data_source:
+  dir: data/klines
+  note: "crypto 默认 data/klines/1m/binance/crypto_perpetual/BTCUSDT_1m.csv"
+backtest:
+  start: "20260801"
+  end: "20260826"
+  initial_cash: 10000
 
 entry:
   description: "4h 快慢 EMA 交叉开仓"
@@ -24,4 +32,5 @@ default_params:
   exit_price_source: close
 
 config_files:
-  - config/example_dual_ma/example.yaml
+  - config/example_dual_ma/strategy.yaml       # crypto（BTCUSDT/binance）
+  - config/example_dual_ma_cu/strategy.yaml    # 期货样例（CU/SHFE，策略代码不变）

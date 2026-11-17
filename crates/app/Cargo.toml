@@ -16,6 +16,7 @@ strategy-positions = { workspace = true }
 strategy-data = { workspace = true }
 strategy-broker = { workspace = true }
 strategy-strategies = { workspace = true }
+strategy-engine = { workspace = true }
 clap = { workspace = true }
 tokio = { workspace = true }
 chrono = { workspace = true }

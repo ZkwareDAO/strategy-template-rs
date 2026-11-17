@@ -1,5 +1,39 @@
 # strategy-rs 开发设计文档
 
+<!-- refcheck:coords=off  2026-11-09 登记为历史文档（决策原文「design.md 登记为历史，
+     不重写」）：本文不再随代码维护，故其 15 处 `file:行` 坐标不参与 CI 第四步校验。
+     留着校验 = 给一份已声明不维护的文档重新背上维护义务，每次重构都得为它改坐标。
+     现状文档的坐标校验由 design-package/*、docs/RUNBOOK.md、
+     docs/exchange-spi-live-acceptance.md（anchors=on）全开承重。 -->
+
+> ## ⚠️ 状态：历史文档（2026-11-09 登记，不再更新）
+>
+> 本文描述 **exchange-spi 统一引擎迁移之前**的架构。登记依据为实测计数，不是印象：
+> **正文（不含本状态块）716 行，含已删实体 14 处**——`RuntimeActor` 11、
+> `runtime_actor.rs` 2、`drive_bar` 1；本块自身也提到这组名字，故对全文直接
+> `grep -c` 会得到 17，多出的 3 处即本块贡献（测量范围必须写清，否则数字自扰）。
+> 这些组件已随 `docs/exchange-spi-retirement.md` 的 R4 / D1b / D2 退役删除。
+> 因此紧随其后的原状态声明「内容全部对齐当前代码」**自本登记起不再成立**；按
+> 「账本只追加不改写」保留原文，一字未删。
+>
+> **仍然对得上的部分**（本次实测，非推断）：正文 15 处 `file:行` 坐标全部可解析、
+> 0 失效（含 `app/src/report.rs:101`、`store/src/lib.rs:25`、`lifecycle.rs:115` 等）；
+> §1 状态机与 Store 语义仍与代码同构（`SignalStatus` 现存于
+> `crates/core/src/lifecycle.rs:21`，原文称信号 8 态 / 订单 7 态）。
+> 一句话：**"谁在驱动主循环"已失效，数据面与状态机仍可参考**。
+>
+> **现行现状真源**（要读就读这些，勿以本文为准）：
+> - 引擎/交易所 SPI 迁移史与门禁 → `docs/exchange-spi-design.md`（v2.11）+
+>   `docs/exchange-spi-retirement.md`（R1–R4 / D1–D3、§6 终局验收）
+> - 需求 / 架构 / 详设 / 接口四件套（坐标逐处核过，v1.2）→ `docs/design-package/`
+> - 运维与配置口径 → `docs/RUNBOOK.md`；在场验收程序 →
+>   `docs/exchange-spi-live-acceptance.md`
+> - 主循环唯一入口 → `crates/engine/src/core/runtime.rs` 的
+>   `ExchangeRunner::on_event`；live 编排宿主 → `crates/app/src/spi_live_actor.rs`
+>
+> 同类的 `docs/live-signal-position-flow.md` 已于同日（2026-11-09）**同样登记为历史**；
+> 仍待断的是 `docs/design-review.md` 的结论时效。
+
 > 依据《怎么样做设计.md》模板产出：**状态机 → 模型 → 模块接口 → 流程图**，
 > 每节配一张验收表格。内容全部对齐当前代码，
 > 引用处标注 `文件:行` 便于核对。
