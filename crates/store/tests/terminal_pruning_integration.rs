@@ -340,18 +340,27 @@ fn three_day_lifecycle_with_restart() {
     assert!(d2p2.contains("pos_a,0,"), "同日新终态行写入快照");
     assert!(d2p2.contains("pos_c,0,"), "同日新活行写入快照");
 
-    // ── Day3 (10-11)：重启进程再跨日——Day2 新终态被裁，pos_c 保留
+    // ── Day3 (10-11)：同日重启 → Day2 当天终态随最新日恢复，
+    //    跨日后 flush 才裁掉；pos_c 活行保留
     let clock3 = Arc::new(AtomicClock(AtomicI64::new(day_ms(2026, 10, 10))));
     let store3 = Store::new(dir.path(), clock3.clone() as Arc<dyn Clock>);
     store3.recover::<PrunePosition>().unwrap();
     store3.recover::<PruneHistory>().unwrap();
     assert_eq!(
         store3.table::<PrunePosition>().get("pos_a"),
-        None,
-        "重启后已裁行不复活"
+        Some(PrunePosition {
+            id: "pos_a".into(),
+            alive: false
+        }),
+        "同日重启恢复最新日的当天终态"
     );
     clock3.set(day_ms(2026, 10, 11));
     store3.flush().unwrap();
+    assert_eq!(
+        store3.table::<PrunePosition>().get("pos_a"),
+        None,
+        "跨日裁剪后旧终态消失"
+    );
     assert_eq!(
         store3.table::<PrunePosition>().get("pos_c"),
         Some(PrunePosition {

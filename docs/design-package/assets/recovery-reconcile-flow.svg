@@ -1,0 +1,69 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 660" width="980" height="660"
+     font-family="Noto Sans SC, Microsoft YaHei, PingFang SC, Segoe UI, sans-serif">
+  <defs>
+    <marker id="arr" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto">
+      <polygon points="0,0 10,5 0,10" fill="#3b5f94"/>
+    </marker>
+  </defs>
+
+  <rect x="0" y="0" width="980" height="660" fill="#ffffff"/>
+  <text x="28" y="38" font-size="17" font-weight="700" fill="#1f2937">恢复 / 对账流（重连与重启共用）</text>
+  <text x="28" y="58" font-size="11" fill="#6b7280">§2.3 · 先查后发 · 不依赖 order_event 重放</text>
+
+  <!-- 触发 -->
+  <rect x="350" y="80" width="280" height="48" rx="24" fill="#d8e7fa" stroke="#8ab4e8" stroke-width="1.5"/>
+  <text x="490" y="110" text-anchor="middle" font-size="12.5" font-weight="700" fill="#1e4d8c">触发：WS Reconnected / 进程重启</text>
+
+  <line x1="490" y1="128" x2="490" y2="158" stroke="#3b5f94" stroke-width="1.8" marker-end="url(#arr)"/>
+
+  <!-- recover -->
+  <rect x="350" y="164" width="280" height="52" rx="10" fill="#e3d8f7" stroke="#a98fe0" stroke-width="1.5"/>
+  <text x="490" y="186" text-anchor="middle" font-size="12.5" font-weight="700" fill="#4c2e94">SignalManager.recover</text>
+  <text x="490" y="205" text-anchor="middle" font-size="10.5" fill="#6a4fa3">按信号状态产出恢复动作（先查后发）</text>
+
+  <line x1="490" y1="216" x2="490" y2="248" stroke="#3b5f94" stroke-width="1.8" marker-end="url(#arr)"/>
+
+  <!-- 决策菱形 -->
+  <polygon points="490,252 610,300 490,348 370,300" fill="#fdf6e0" stroke="#d9bb63" stroke-width="1.5"/>
+  <text x="490" y="305" text-anchor="middle" font-size="12.5" font-weight="700" fill="#7a5f14">信号状态？</text>
+
+  <!-- 三分支 -->
+  <line x1="370" y1="300" x2="200" y2="392" stroke="#3b5f94" stroke-width="1.6" marker-end="url(#arr)"/>
+  <text x="255" y="338" text-anchor="middle" font-size="10.5" fill="#4b5563" paint-order="stroke" stroke="#ffffff" stroke-width="4" stroke-linejoin="round">Created / Validated</text>
+
+  <line x1="490" y1="348" x2="490" y2="392" stroke="#3b5f94" stroke-width="1.6" marker-end="url(#arr)"/>
+  <text x="502" y="376" font-size="10.5" fill="#4b5563" paint-order="stroke" stroke="#ffffff" stroke-width="4" stroke-linejoin="round">Submitted / Accepted</text>
+
+  <line x1="610" y1="300" x2="780" y2="392" stroke="#3b5f94" stroke-width="1.6" marker-end="url(#arr)"/>
+  <text x="725" y="338" text-anchor="middle" font-size="10.5" fill="#4b5563" paint-order="stroke" stroke="#ffffff" stroke-width="4" stroke-linejoin="round">Failed</text>
+
+  <!-- 分支卡 -->
+  <rect x="60" y="398" width="280" height="104" rx="10" fill="#d5ecdc" stroke="#7fc08f" stroke-width="1.5"/>
+  <text x="200" y="424" text-anchor="middle" font-size="12.5" font-weight="700" fill="#245c34">Resubmit 幂等重提</text>
+  <text x="200" y="448" text-anchor="middle" font-size="10.5" fill="#3f7a52">同 signal_id 重提，不产生新意图</text>
+  <text x="200" y="470" text-anchor="middle" font-size="10.5" fill="#3f7a52">前提：price &gt; 0</text>
+  <text x="200" y="492" text-anchor="middle" font-size="10" font-weight="700" fill="#2d7a45">输出 Resubmit</text>
+
+  <rect x="350" y="398" width="280" height="104" rx="10" fill="#f7ecc8" stroke="#d9bb63" stroke-width="1.5"/>
+  <text x="490" y="424" text-anchor="middle" font-size="12.5" font-weight="700" fill="#7a5f14">Query 查询修正</text>
+  <text x="490" y="448" text-anchor="middle" font-size="10.5" fill="#8d742e">get_order 修正状态（不重放 order_event）</text>
+  <text x="490" y="470" text-anchor="middle" font-size="10.5" fill="#8d742e">前提：已绑定 order_id</text>
+  <text x="490" y="492" text-anchor="middle" font-size="10" font-weight="700" fill="#8a6a1c">输出 Query</text>
+
+  <rect x="640" y="398" width="280" height="104" rx="10" fill="#f7d8e2" stroke="#e093aa" stroke-width="1.5"/>
+  <text x="780" y="424" text-anchor="middle" font-size="12.5" font-weight="700" fill="#94334f">分情况处理</text>
+  <text x="780" y="448" text-anchor="middle" font-size="10.5" fill="#a8576e">Close 且非拒单/ReduceOnly → 到期重提</text>
+  <text x="780" y="470" text-anchor="middle" font-size="10.5" fill="#a8576e">开仓 Failed / 拒单 → 不重提</text>
+  <text x="780" y="492" text-anchor="middle" font-size="10" font-weight="700" fill="#a04262">仅平仓信号可重试</text>
+
+  <!-- 汇合 -->
+  <line x1="200" y1="502" x2="420" y2="556" stroke="#3b5f94" stroke-width="1.6" marker-end="url(#arr)"/>
+  <line x1="490" y1="502" x2="490" y2="550" stroke="#3b5f94" stroke-width="1.6" marker-end="url(#arr)"/>
+  <line x1="780" y1="502" x2="560" y2="556" stroke="#3b5f94" stroke-width="1.6" marker-end="url(#arr)"/>
+
+  <!-- 对账 -->
+  <rect x="350" y="562" width="280" height="52" rx="10" fill="#e3d8f7" stroke="#a98fe0" stroke-width="1.5"/>
+  <text x="490" y="584" text-anchor="middle" font-size="12.5" font-weight="700" fill="#4c2e94">get_positions 每分钟远程对账</text>
+  <text x="490" y="603" text-anchor="middle" font-size="10.5" fill="#6a4fa3">远程无匹配仓位 → external_close（fail-open）</text>
+</svg>

@@ -22,3 +22,12 @@
 /data/livemock/
 /logs/
 .env
+.superpowers/
+
+# 本地工具态目录与会话 scratch（不入库；均为本机临时物）
+/.workbuddy/
+/.workbuddy-ai/
+/build_log.txt
+/test_out.txt
+/test_err.txt
+/deliverables/
