@@ -1,7 +1,7 @@
 //! TradingServiceClient —— trading-service 的 WS 客户端（真实 SouthCommand/ClientEvent 协议）
 //!
 //! 拓扑：一个客户端实例持有「策略类型名 → 一条认证 WS 连接」的懒连接池；
-//! 同策略类型的多个符号 RuntimeActor 复用一条连接（真实服务 1 连接绑定 1 策略名）。
+//! 同策略类型的多个符号 live actor 实例复用一条连接（真实服务 1 连接绑定 1 策略名）。
 //! - 每次（重）连接：随机 nonce + HMAC-SHA256(secret, strategy_name+nonce)，
 //!   query 携带 strategy_name/nonce/signature；
 //! - place_order 开仓/平仓同帧（平仓方向已由 core 反向）；ack(NEW) 返回
@@ -12,7 +12,16 @@
 //! - get_positions 仓位对账：positions_fut 发 option=get_positions 按
 //!   instrument 读 trading-service 仓位视图，应答帧 type=positions；
 //!   空数组=无仓；venue 非法回 error；超时 Retryable；
-//! - submit_enabled=false（默认）本地即拒，绝不发真实下单请求。
+//! - get_klines 历史回填：[`TradingServiceClient::get_klines`] 发 option=get_klines
+//!   读服务端本地留存 1m bar（内存保留窗+归档 CSV，协议 §10.4），应答帧
+//!   type=kline_history（升序，has_more 翻页）；无数据=空数组非错误；超时 Retryable；
+//! - submit_enabled=false（默认）本地即拒，绝不发真实下单请求；
+//! - **K线流**（协议 v2 `subscribe_kline` → `kline_1m(_batch)` 推送）：
+//!   [`TradingServiceClient::subscribe_klines`] 按 **(策略类型, exchange)** 分组
+//!   登记订阅（每次（重）连接**逐组**重发订阅帧——同策略跨交易所不再互相顶掉）；
+//!   定稿 bar 走**独立 broadcast 通道**
+//!   [`TradingServiceClient::kline_updates`]，不占订单事件 mpsc——
+//!   高频回放不会反压订单路径，消费落后由 broadcast::Lagged 自愈。
 
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -27,12 +36,12 @@ use strategy_signals::gateway::{
     SubmitError, SubmitFuture,
 };
 use tokio::runtime::Handle;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio_tungstenite::tungstenite::Message;
 use tracing::{debug, trace, warn};
 
 use crate::auth;
-use crate::wire::{self, InEvent, PlaceOrderClose, PlaceOrderOpen};
+use crate::wire::{self, InEvent, PlaceOrderClose, PlaceOrderOpen, WireKline};
 
 #[derive(Debug, Clone)]
 pub struct TradingConfig {
@@ -96,6 +105,9 @@ pub struct OrderUpdate {
     pub message: Option<String>,
     /// 实际委托要素（受理回写，审计核对真实下单参数）
     pub place: Option<OrderPlace>,
+    /// 真实手续费（阶段 4 v2.7，§13-4「FillEvent.fee 不再恒 0」）：
+    /// 服务端升级后 FILLED/PARTIAL 帧回传；None = 未回传（下游 0 兜底）。
+    pub fee: Option<f64>,
 }
 
 /// 连接任务在途命令类别（决定应答帧按哪条路径分派）
@@ -107,6 +119,11 @@ enum CmdKind {
     GetOrder,
     /// get_positions：应答帧 positions/error，关联键 instrument
     GetPositions,
+    /// get_klines：应答帧 kline_history/error，关联键 symbol（帧顶层回声）
+    GetKlines,
+    /// subscribe_kline / unsubscribe_kline：无请求-应答关联（推送走
+    /// kline broadcast；订阅失败由 error 帧在途匹配之外的通道反馈）
+    Notify,
 }
 
 /// 在途应答通道：按命令类别携带不同回包
@@ -114,6 +131,9 @@ enum CmdReply {
     Submit(oneshot::Sender<Result<String, SubmitError>>),
     Order(oneshot::Sender<Result<OrderSnapshot, SubmitError>>),
     Positions(oneshot::Sender<Result<Vec<RemotePosition>, SubmitError>>),
+    Klines(oneshot::Sender<Result<KlineHistory, SubmitError>>),
+    /// Notify 类命令：无人等待应答
+    None,
 }
 
 /// 一条在途请求（应答帧回声关联键后精确匹配）
@@ -131,11 +151,69 @@ struct WsCommand {
     reply: CmdReply,
 }
 
+/// K线定稿推送（`kline_1m`/`kline_1m_batch` 帧的统一出形；只增不改订单流）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct KlineUpdate {
+    pub venue: String,
+    pub symbol: String,
+    /// 桶开始时间（UTC 毫秒，含）
+    pub start_ms: i64,
+    pub end_ms: i64,
+    pub open: f64,
+    pub high: f64,
+    pub low: f64,
+    pub close: f64,
+    pub volume: f64,
+    pub quote_volume: f64,
+    pub trade_num: u64,
+    pub active_buy_volume: f64,
+    pub active_buy_quote_volume: f64,
+}
+
+impl WireKline {
+    /// 线帧 → 本地 KlineUpdate；缺关键字段（时间戳非数）返回 None 并告警。
+    fn into_update(self) -> Option<KlineUpdate> {
+        let (Some(start_ms), Some(end_ms)) = (self.start_time, self.end_time) else {
+            warn!(symbol = %self.symbol, "kline 帧缺 start_time/end_time，丢弃");
+            return None;
+        };
+        Some(KlineUpdate {
+            venue: self.venue.unwrap_or_default(),
+            symbol: self.symbol,
+            start_ms,
+            end_ms,
+            open: wire::opt_f64(&self.open),
+            high: wire::opt_f64(&self.high),
+            low: wire::opt_f64(&self.low),
+            close: wire::opt_f64(&self.close),
+            volume: wire::opt_f64(&self.volume),
+            quote_volume: wire::opt_f64(&self.quote_volume),
+            trade_num: wire::opt_f64(&self.trade_num) as u64,
+            active_buy_volume: wire::opt_f64(&self.active_buy_volume),
+            active_buy_quote_volume: wire::opt_f64(&self.active_buy_quote_volume),
+        })
+    }
+}
+
+/// get_klines 应答（协议 §10.4 `kline_history` 帧）：升序定稿 bar + 翻页标记。
+#[derive(Debug, Clone, PartialEq)]
+pub struct KlineHistory {
+    pub bars: Vec<KlineUpdate>,
+    /// true = 服务端还有更早数据（用本批最早 bar 的 start_time 作 end_time 续翻）
+    pub has_more: bool,
+}
+
 struct Inner {
     cfg: TradingConfig,
     handle: Handle,
     event_tx: mpsc::Sender<ClientEvent>,
     conns: DashMap<String, mpsc::Sender<WsCommand>>,
+    /// K线 broadcast 出口（与订单 mpsc 隔离；容量见 start_arc）
+    kline_tx: broadcast::Sender<KlineUpdate>,
+    /// (策略类型, exchange) → K线订阅 symbol 集（重连时逐组各发一帧）。
+    /// 键里必须带 exchange：曾因登记只按策略类型单值 exchange，同策略跨
+    /// 交易所后订者覆盖先订者，重连后先订交易所的 K 线永久断流。
+    kline_subs: DashMap<(String, String), Vec<String>>,
 }
 
 pub struct TradingServiceClient {
@@ -149,11 +227,16 @@ impl TradingServiceClient {
         handle: Handle,
     ) -> (Arc<Self>, mpsc::Receiver<ClientEvent>) {
         let (event_tx, event_rx) = mpsc::channel(256);
+        // K线 broadcast：加速回放一帧一根，容量放大到 4096 吸收短时突发；
+        // 仍落后则 Lagged（消费方按既有 Lagged 自愈路径补数据）。
+        let (kline_tx, _) = broadcast::channel(4096);
         let inner = Arc::new(Inner {
             cfg,
             handle,
             event_tx,
             conns: DashMap::new(),
+            kline_tx,
+            kline_subs: DashMap::new(),
         });
         (Arc::new(Self { inner }), event_rx)
     }
@@ -165,21 +248,92 @@ impl TradingServiceClient {
             .entry(strategy_type.to_string())
             .or_insert_with(|| {
                 let (cmd_tx, cmd_rx) = mpsc::channel(256);
-                self.inner.handle.spawn(connection_loop(
-                    strategy_type.to_string(),
-                    self.inner.cfg.clone(),
-                    cmd_rx,
-                    self.inner.event_tx.clone(),
-                ));
+                let inner = Arc::clone(&self.inner);
+                self.inner
+                    .handle
+                    .spawn(connection_loop(inner, strategy_type.to_string(), cmd_rx));
                 cmd_tx
             })
             .clone()
     }
 
+    /// 登记并立即发送 `subscribe_kline` 订阅帧（协议 v2：symbols + interval=1m）。
+    /// 同 (策略类型, exchange) 重复调用做 symbol 并集；不同 exchange 各自成组
+    /// 互不覆盖；断线重连由连接任务按登记**逐组**重发。
+    /// K线帧经 [`Self::kline_updates`] 收取，不占订单事件通道。
+    pub async fn subscribe_klines(
+        &self,
+        strategy_type: &str,
+        exchange: &str,
+        symbols: &[String],
+    ) -> Result<(), SubmitError> {
+        if symbols.is_empty() {
+            return Ok(());
+        }
+        let key = (strategy_type.to_string(), exchange.to_string());
+        {
+            let mut entry = self.inner.kline_subs.entry(key.clone()).or_default();
+            for s in symbols {
+                if !entry.iter().any(|e| e == s) {
+                    entry.push(s.clone());
+                }
+            }
+        }
+        let syms = self
+            .inner
+            .kline_subs
+            .get(&key)
+            .map(|g| g.clone())
+            .unwrap_or_default();
+        let payload = TradingServiceClient::subscribe_frame(exchange, &syms);
+        let conn = self.conn_for(strategy_type);
+        conn.send(WsCommand {
+            payload,
+            kind: CmdKind::Notify,
+            key: String::new(),
+            reply: CmdReply::None,
+        })
+        .await
+        .map_err(|_| SubmitError::retryable("连接任务已关闭"))
+    }
+
+    /// 订阅帧构形（首订与重连重发共用；协议 §10.1）。
+    fn subscribe_frame(exchange: &str, symbols: &[String]) -> serde_json::Value {
+        serde_json::json!({
+            "option": "subscribe_kline",
+            "exchange": exchange,
+            "instrument_type": "futures",
+            "symbols": symbols,
+            "interval": "1m",
+        })
+    }
+
+    /// 某策略类型全部订阅登记 → 每 exchange 各一帧（重连/周期重订共用）。
+    fn subs_frames_for(
+        kline_subs: &DashMap<(String, String), Vec<String>>,
+        strategy_type: &str,
+    ) -> Vec<serde_json::Value> {
+        kline_subs
+            .iter()
+            .filter(|e| e.key().0 == strategy_type)
+            .map(|e| TradingServiceClient::subscribe_frame(&e.key().1, e.value()))
+            .collect()
+    }
+
+    /// K线定稿推送接收端（broadcast：每个 receiver 独立游标，落后 Lagged 自愈；
+    /// drop 即取消，不影响其他消费者）。
+    pub fn kline_updates(&self) -> broadcast::Receiver<KlineUpdate> {
+        self.inner.kline_tx.subscribe()
+    }
+
     /// 异步下单：发 place_order → 等 ack，成功返回服务端 client_order_id。
-    /// 按 `intent.position_id` 区分帧形：
-    /// - 无（开仓）：order_cash + leverage，数量由服务端按市价换算；
-    /// - 有（平仓/反手平仓条）：quantity 精确取成交回报量，reduce_only 恒 true。
+    /// 帧形判定（阶段 4 v2.7）：
+    /// - `intent.offset` 显式给出（SPI live 桥路径）：**按 offset 定帧形**——
+    ///   `open` ⇒ 开仓帧（order_cash+leverage），其余 ⇒ 平仓帧（quantity 精确
+    ///   取成交回报量，reduce_only 恒 true）；`offset` 字段原样落帧，
+    ///   「实盘订单帧带平今/平昨」验收由此承重（§13-4）。
+    /// - `intent.offset == None`（旧链路）：维持 `position_id` 隐式判定，
+    ///   帧内不出现 offset 字段——旧服务端行为逐字节不变（零回归）。
     pub async fn submit_order(
         &self,
         strategy_type: &str,
@@ -200,7 +354,22 @@ impl TradingServiceClient {
             Side::Long => "long",
             Side::Short => "short",
         };
-        let is_close = intent.position_id.is_some();
+        let offset = intent.offset.as_deref();
+        let is_close = match offset {
+            Some("open") => false,
+            Some("close") | Some("close_today") | Some("close_yesterday") => true,
+            // 过渡口径：auto/未知标签退回隐式判定（不猜，保守按 position_id）
+            _ => intent.position_id.is_some(),
+        };
+        if offset
+            .is_some_and(|o| !matches!(o, "open" | "close" | "close_today" | "close_yesterday"))
+        {
+            warn!(
+                signal_id = intent.id,
+                offset = offset.unwrap(),
+                "未知 offset 标签，回落 position_id 隐式判定"
+            );
+        }
         let payload = if is_close {
             let quantity = intent.size;
             if quantity <= 0.0 {
@@ -224,6 +393,7 @@ impl TradingServiceClient {
                 quantity: &qty_raw,
                 reduce_only: true,
                 signal_id: &intent.id,
+                offset,
             })
         } else {
             let order_cash = venue.order_cash;
@@ -242,6 +412,7 @@ impl TradingServiceClient {
                 order_cash: &cash_raw,
                 leverage: venue.leverage,
                 signal_id: &intent.id,
+                offset,
             })
         }
         .expect("place_order 帧序列化恒成立");
@@ -355,6 +526,53 @@ impl TradingServiceClient {
             Err(_) => Err(SubmitError::retryable("positions 应答等待超时")),
         }
     }
+
+    /// 历史 K 线回填：发 get_klines（§10.4，读服务端本地留存）→ 等
+    /// type=kline_history 应答。start/end 缺省 = 取最近 `limit` 根（升序）；
+    /// 无数据返回空 bars（不是错误）；参数非法回 Rejected；超时/断线 Retryable。
+    pub async fn get_klines(
+        &self,
+        strategy_type: &str,
+        exchange: &str,
+        symbol: &str,
+        start_ms: Option<i64>,
+        end_ms: Option<i64>,
+        limit: Option<u32>,
+    ) -> Result<KlineHistory, SubmitError> {
+        let mut payload = serde_json::json!({
+            "option": "get_klines",
+            "exchange": exchange,
+            "symbol": symbol,
+        });
+        if let Some(s) = start_ms {
+            payload["start_time"] = serde_json::json!(s);
+        }
+        if let Some(e) = end_ms {
+            payload["end_time"] = serde_json::json!(e);
+        }
+        if let Some(l) = limit {
+            payload["limit"] = serde_json::json!(l);
+        }
+        debug!(
+            strategy_type, symbol, %payload,
+            "K线：准备提交 get_klines（历史回填，经策略类型连接池）"
+        );
+        let (reply_tx, reply_rx) = oneshot::channel();
+        let conn = self.conn_for(strategy_type);
+        conn.send(WsCommand {
+            payload,
+            kind: CmdKind::GetKlines,
+            key: symbol.to_string(),
+            reply: CmdReply::Klines(reply_tx),
+        })
+        .await
+        .map_err(|_| SubmitError::retryable("连接任务已关闭"))?;
+        match tokio::time::timeout(self.inner.cfg.request_timeout, reply_rx).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(_)) => Err(SubmitError::retryable("应答通道关闭（连接断开）")),
+            Err(_) => Err(SubmitError::retryable("kline_history 应答等待超时")),
+        }
+    }
 }
 
 /// live 信号 Actor 持有的 async 网关；构造时绑定策略类型（连接池键）与
@@ -445,17 +663,17 @@ async fn connect(cfg: &TradingConfig, strategy_type: &str) -> Result<WsStream, S
 }
 
 async fn connection_loop(
+    inner: Arc<Inner>,
     strategy: String,
-    cfg: TradingConfig,
     mut cmd_rx: mpsc::Receiver<WsCommand>,
-    event_tx: mpsc::Sender<ClientEvent>,
 ) {
     let mut attempt: u32 = 0;
     loop {
-        match connect(&cfg, &strategy).await {
+        match connect(&inner.cfg, &strategy).await {
             Ok(ws) => {
                 attempt = 0;
-                if event_tx
+                if inner
+                    .event_tx
                     .send(ClientEvent::Reconnected {
                         strategy_name: strategy.clone(),
                     })
@@ -465,8 +683,18 @@ async fn connection_loop(
                     return; // 事件消费端关闭 → 退出
                 }
                 debug!(strategy = %strategy, "订单：已通知 Reconnected（T7 将下发对账）");
-                if run_connection(ws, &mut cmd_rx, &event_tx, PING_INTERVAL, READ_IDLE_TIMEOUT)
-                    .await
+                if run_connection(
+                    ws,
+                    &mut cmd_rx,
+                    &inner.event_tx,
+                    &inner.kline_tx,
+                    &inner.kline_subs,
+                    &strategy,
+                    PING_INTERVAL,
+                    READ_IDLE_TIMEOUT,
+                    RESUBSCRIBE_INTERVAL,
+                )
+                .await
                 {
                     debug!(strategy = %strategy, "订单：连接任务退出（命令通道关闭）");
                     return; // 命令通道关闭 → 退出
@@ -480,8 +708,8 @@ async fn connection_loop(
         attempt += 1;
         let delay = 1u64
             .checked_shl(attempt.saturating_sub(1))
-            .unwrap_or(cfg.reconnect_backoff_max_secs)
-            .min(cfg.reconnect_backoff_max_secs);
+            .unwrap_or(inner.cfg.reconnect_backoff_max_secs)
+            .min(inner.cfg.reconnect_backoff_max_secs);
         debug!(strategy = %strategy, attempt, delay_secs = delay, "订单：退避等待后重连");
         tokio::time::sleep(Duration::from_secs(delay)).await;
     }
@@ -493,14 +721,23 @@ const PING_INTERVAL: Duration = Duration::from_secs(15);
 /// 读空闲看门狗：该时长内未收到**任何**帧（含 Pong）→ 判定半开死连
 /// （TCP ESTAB 但服务端 handler 已死），强制断开走既有退避重连。
 const READ_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+/// K线订阅周期重订：服务端订阅生命周期可能在连接存活时被静默清空（异常关
+/// 连接的策略级清理等），不能只依赖断线重连；按周期重发 subscribe_kline 兜底。
+const RESUBSCRIBE_INTERVAL: Duration = Duration::from_secs(60);
 
 /// 处理一条连接上的双向消息。返回 true = 应退出任务（命令通道关闭/事件通道关闭）。
+// 参数全是连接级共享通道与三个独立心跳配置，打包 struct 只增加间接层。
+#[allow(clippy::too_many_arguments)]
 async fn run_connection(
     ws: WsStream,
     cmd_rx: &mut mpsc::Receiver<WsCommand>,
     event_tx: &mpsc::Sender<ClientEvent>,
+    kline_tx: &broadcast::Sender<KlineUpdate>,
+    kline_subs: &DashMap<(String, String), Vec<String>>,
+    strategy: &str,
     ping_interval_cfg: Duration,
     read_idle_timeout_cfg: Duration,
+    resubscribe_interval_cfg: Duration,
 ) -> bool {
     // 在途命令应答（Submit/GetOrder）：应答帧回声关联键后精确匹配
     let mut pending: VecDeque<PendingEntry> = VecDeque::new();
@@ -509,9 +746,26 @@ async fn run_connection(
     // 会同时持有 &mut sink → 包一层 Arc<Mutex>，分支只共享地借用锁。
     let sink = Arc::new(tokio::sync::Mutex::new(raw_sink));
 
+    // 重连重发的 K线订阅帧（真实服务订阅为连接级，断线即失效；
+    // 按登记逐 exchange 各发一帧——见 kline_subs 键设计）。
+    let subs_payload = TradingServiceClient::subs_frames_for(kline_subs, strategy);
+    for frame in subs_payload {
+        debug!(%frame, "K线：重连重发 subscribe_kline 订阅帧");
+        let mut s = sink.lock().await;
+        if s.send(Message::Text(frame.to_string())).await.is_err() {
+            return false; // 触发重连
+        }
+        drop(s);
+    }
+
     // 心跳：interval 首 tick 立即就绪，先消费掉再进循环。
     let mut ping_interval = tokio::time::interval(ping_interval_cfg);
     ping_interval.tick().await;
+    // 周期重订：interval 首 tick 立即就绪，先消费掉，首次重发发生在一个周期后。
+    // 0 周期会让 interval panic，兜底到 1ms（测试可传极短值）。
+    let mut resubscribe_interval =
+        tokio::time::interval(resubscribe_interval_cfg.max(Duration::from_millis(1)));
+    resubscribe_interval.tick().await;
     // 读空闲看门狗：每收到一帧就 reset 到时点后；触发即重连。
     let mut idle_timeout = Box::pin(tokio::time::sleep(read_idle_timeout_cfg));
 
@@ -538,16 +792,23 @@ async fn run_connection(
                         CmdReply::Positions(r) => {
                             let _ = r.send(Err(e));
                         }
+                        CmdReply::Klines(r) => {
+                            let _ = r.send(Err(e));
+                        }
+                        CmdReply::None => {}
                     }
                     return false; // 触发重连
                 }
                 drop(s);
-                debug!(params = %cmd.payload, "发送给 trading-service 的下单参数（place_order 帧已通过 WS 发出，等待 ack）");
-                pending.push_back(PendingEntry {
-                    kind: cmd.kind,
-                    key: cmd.key,
-                    reply: cmd.reply,
-                });
+                debug!(kind = ?cmd.kind, params = %cmd.payload, "已通过 WS 发送请求帧（应答按命令类别关联；Notify 无应答）");
+                // Notify 类命令（subscribe_kline 等）无请求-应答关联，不入在途表。
+                if !matches!(cmd.reply, CmdReply::None) {
+                    pending.push_back(PendingEntry {
+                        kind: cmd.kind,
+                        key: cmd.key,
+                        reply: cmd.reply,
+                    });
+                }
             }
             item = source.next() => {
                 let Some(result) = item else { return false };
@@ -576,7 +837,7 @@ async fn run_connection(
                                     positions = ?ev.positions,
                                     "订单：入站帧已解析（回调参数全量审计）"
                                 );
-                                if !dispatch_in(ev, &mut pending, event_tx).await {
+                                if !dispatch_in(ev, &mut pending, event_tx, kline_tx).await {
                                     return true;
                                 }
                             }
@@ -595,6 +856,21 @@ async fn run_connection(
                     Err(e) => {
                         warn!(error = %e, "订单：WS 读取错误，进入退避重连");
                         return false;
+                    }
+                }
+            }
+            _ = resubscribe_interval.tick() => {
+                // 订阅生命周期兜底：连接心跳正常但仍收不到 K 线时（服务端在
+                // 异常关连接等路径上静默清订阅），按登记周期重发订阅帧，
+                // 一个周期内自愈，不必等到断线重连。
+                let frames = TradingServiceClient::subs_frames_for(kline_subs, strategy);
+                if !frames.is_empty() {
+                    let mut s = sink.lock().await;
+                    for frame in frames {
+                        debug!(%frame, "K线：周期重订 subscribe_kline 订阅帧");
+                        if s.send(Message::Text(frame.to_string())).await.is_err() {
+                            return false; // 触发重连
+                        }
                     }
                 }
             }
@@ -668,6 +944,21 @@ fn take_positions(
     pending.remove(pos)
 }
 
+/// 取 GetKlines 在途条目：应答顶层 symbol 精确；空结果/参数错误帧可能无
+/// 回声 → FIFO（请求按序，服务端按序应答）。
+fn take_klines(pending: &mut VecDeque<PendingEntry>, symbol: Option<&str>) -> Option<PendingEntry> {
+    if let Some(sym) = symbol {
+        if let Some(pos) = pending
+            .iter()
+            .position(|p| p.kind == CmdKind::GetKlines && p.key == sym)
+        {
+            return pending.remove(pos);
+        }
+    }
+    let pos = pending.iter().position(|p| p.kind == CmdKind::GetKlines)?;
+    pending.remove(pos)
+}
+
 /// 从回调帧提取实际委托要素；order_type 缺失（旧服务端）→ None。
 fn place_from(
     order_type: &Option<String>,
@@ -681,11 +972,13 @@ fn place_from(
     })
 }
 
-/// 分发入站事件；false = 事件通道关闭应退出。
+/// 分发入站事件；false = 事件通道关闭应退出。K线帧走 kline_tx broadcast，
+/// 不占订单事件通道（高频回放与订单路径隔离）。
 async fn dispatch_in(
     ev: InEvent,
     pending: &mut VecDeque<PendingEntry>,
     event_tx: &mpsc::Sender<ClientEvent>,
+    kline_tx: &broadcast::Sender<KlineUpdate>,
 ) -> bool {
     // ev 为本函数独有：顶层解构，各臂按值使用，避免对帧内 String 的多余 clone。
     let InEvent {
@@ -701,11 +994,25 @@ async fn dispatch_in(
         order_type,
         order_price,
         order_quantity,
+        fee,
         positions,
+        kline,
+        klines,
+        symbol,
+        has_more,
         message,
     } = ev;
+    // 真实手续费（阶段 4 v2.7）：缺失=null → None；数字/字符串双口径。
+    let fee_val = fee.as_ref().map(wire::f64_or_zero);
     match kind.as_str() {
         "ack" => {
+            // 订阅 ack（首订/周期重订）：无 client_order_id，不是订单应答。
+            // 走 debug，避免周期重订把「无在途请求的 ack」WARN 每分钟刷一遍。
+            if client_order_id.is_none() && message.as_deref().is_some_and(|m| m.contains("已订阅"))
+            {
+                debug!(message = %message.unwrap_or_default(), "K线订阅 ack（无订单在途）");
+                return true;
+            }
             // ack 恒为 place_order 应答：只匹配 Submit 条目
             let Some(entry) = take_submit(pending, signal_id.as_deref()) else {
                 tracing::warn!(?client_order_id, "无在途请求的 ack，忽略");
@@ -736,6 +1043,7 @@ async fn dispatch_in(
                     signal_id,
                     message: None,
                     place,
+                    fee: fee_val,
                 };
                 if let Err(e) = event_tx.try_send(ClientEvent::OrderUpdate(upd)) {
                     tracing::warn!(error = %e, "ack 附带 OrderUpdate 投递失败（exchange_order_id 未落账）");
@@ -743,6 +1051,18 @@ async fn dispatch_in(
             }
         }
         "error" => {
+            // K线订阅相关错误（subscribe_kline 拒订阅等，帧无 signal_id 回声）
+            // 不得吞掉订单在途请求：显式识别后仅告警丢弃，正常订单 error 路径不变。
+            if message
+                .as_deref()
+                .is_some_and(|m| m.contains("K线") || m.contains("subscribe_kline"))
+            {
+                warn!(
+                    message = %message.unwrap_or_default(),
+                    "K线订阅错误帧（不占订单在途匹配，已丢弃）"
+                );
+                return true;
+            }
             // 按「Submit signal_id 精确 → GetOrder signal_id 精确 → GetOrder FIFO
             // → GetPositions FIFO（error 帧无 instrument 回声）→ Submit FIFO」
             // 顺序匹配，避免类别间互吞。
@@ -777,6 +1097,13 @@ async fn dispatch_in(
                         .position(|p| p.kind == CmdKind::GetPositions)
                         .and_then(|i| pending.remove(i))
                 })
+                .or_else(|| {
+                    // get_klines 的参数错误帧无 symbol 回声（§10.4）→ FIFO 命中在途查询
+                    pending
+                        .iter()
+                        .position(|p| p.kind == CmdKind::GetKlines)
+                        .and_then(|i| pending.remove(i))
+                })
                 .or_else(|| take_submit(pending, None));
             let Some(entry) = entry else {
                 tracing::warn!(?message, "无在途请求的 error 帧，忽略");
@@ -793,6 +1120,10 @@ async fn dispatch_in(
                 CmdReply::Positions(reply) => {
                     let _ = reply.send(Err(SubmitError::rejected(msg)));
                 }
+                CmdReply::Klines(reply) => {
+                    let _ = reply.send(Err(SubmitError::rejected(msg)));
+                }
+                CmdReply::None => {}
             }
         }
         // get_order 成功应答：字段与 ack/order_event 同形
@@ -814,6 +1145,7 @@ async fn dispatch_in(
                         exchange_order_id,
                         filled_quantity_raw: wire::opt_number_raw(&filled_quantity),
                         place: place_from(&order_type, &order_price, &order_quantity),
+                        fee: fee_val,
                     }),
                     Some(None) => Err(SubmitError::retryable(format!(
                         "order 帧状态未知：{}",
@@ -870,9 +1202,47 @@ async fn dispatch_in(
                 signal_id,
                 message,
                 place,
+                fee: fee_val,
             };
             if event_tx.send(ClientEvent::OrderUpdate(upd)).await.is_err() {
                 return false;
+            }
+        }
+        // get_klines 应答（§10.4）：klines 与批量推送帧内 bar 完全同形；
+        // 顶层 symbol 回声为关联键，无回声（或越序）时 FIFO 命中在途查询。
+        "kline_history" => {
+            let echo = symbol.as_deref();
+            let Some(entry) = take_klines(pending, echo) else {
+                tracing::warn!(?echo, "无在途 get_klines 请求的 kline_history 帧，忽略");
+                return true;
+            };
+            let CmdReply::Klines(reply) = entry.reply else {
+                unreachable!("take_klines 恒返回 GetKlines 条目")
+            };
+            let bars = klines
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(WireKline::into_update)
+                .collect();
+            let _ = reply.send(Ok(KlineHistory {
+                bars,
+                has_more: has_more.unwrap_or(false),
+            }));
+        }
+        // K线定稿推送（协议 v2）：单根 kline_1m / 同所批量 kline_1m_batch。
+        "kline_1m" => {
+            if let Some(k) = kline.and_then(WireKline::into_update) {
+                // broadcast send 永不阻塞；无订阅者 = 无人挂 K线流，静默。
+                let _ = kline_tx.send(k);
+            }
+        }
+        "kline_1m_batch" => {
+            for k in klines
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(WireKline::into_update)
+            {
+                let _ = kline_tx.send(k);
             }
         }
         // positions（get_position 应答）当前无消费方；welcome 等忽略。
@@ -935,6 +1305,7 @@ mod tests {
             stop_order_id: None,
             created_event_time: chrono::Utc::now(),
             status: SignalStatus::Created,
+            offset: None,
         }
     }
 
@@ -1039,6 +1410,45 @@ mod tests {
         // 服务不可达：连接失败 → request_timeout(3s) 后保守判 Retryable
         let err = gw.query_fut("0xanything").await.unwrap_err();
         assert_eq!(err.kind, FailureKind::Retryable);
+    }
+
+    /// 同策略类型跨交易所订阅：登记互不覆盖，重连重发逐 exchange 各一帧
+    /// （回归钉：曾因 kline_subs 只按策略类型存单值 exchange，后订者顶掉
+    /// 先订者，重连后先订交易所的 K 线永久断流）。
+    #[tokio::test]
+    async fn kline_subs_per_exchange_no_overwrite() {
+        let (client, _ev) =
+            TradingServiceClient::start_arc(cfg_for("ws://127.0.0.1:1".into()), Handle::current());
+        client
+            .subscribe_klines("dual", "binance", &["BTCUSDT".to_string()])
+            .await
+            .expect("命令入队即成功（连接懒建，不要求 TCP 可达）");
+        client
+            .subscribe_klines("dual", "SHFE", &["CU".to_string()])
+            .await
+            .expect("命令入队即成功");
+        let frames = TradingServiceClient::subs_frames_for(&client.inner.kline_subs, "dual");
+        assert_eq!(frames.len(), 2, "两个 exchange 各成一组，重连应逐组重发");
+        let by_ex: std::collections::BTreeMap<String, Vec<String>> = frames
+            .iter()
+            .map(|f| {
+                (
+                    f["exchange"].as_str().unwrap().to_string(),
+                    f["symbols"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|s| s.as_str().unwrap().to_string())
+                        .collect(),
+                )
+            })
+            .collect();
+        assert_eq!(by_ex.get("binance").unwrap(), &vec!["BTCUSDT".to_string()]);
+        assert_eq!(by_ex.get("SHFE").unwrap(), &vec!["CU".to_string()]);
+        // 其他策略类型不受牵连
+        assert!(
+            TradingServiceClient::subs_frames_for(&client.inner.kline_subs, "other").is_empty()
+        );
     }
 
     // ── get_order 真实查询：脚本 WS 收到 get_order 帧后回 type=order ───────
@@ -1308,16 +1718,22 @@ mod tests {
             strategy_secret: String::new(),
         };
         let ws = connect(&cfg, "st").await.expect("握手成功");
+        let subs: DashMap<(String, String), Vec<String>> = DashMap::new();
         let (_cmd_tx, mut cmd_rx) = mpsc::channel::<WsCommand>(8);
         let (event_tx, _event_rx) = mpsc::channel::<ClientEvent>(8);
+        let (kline_tx, _kline_rx) = broadcast::channel::<KlineUpdate>(8);
         let exit = tokio::time::timeout(
             Duration::from_secs(2),
             run_connection(
                 ws,
                 &mut cmd_rx,
                 &event_tx,
+                &kline_tx,
+                &subs,
+                "st",
                 Duration::from_millis(100),
                 Duration::from_millis(300),
+                Duration::from_secs(3600),
             ),
         )
         .await
@@ -1341,14 +1757,20 @@ mod tests {
         let ws = connect(&cfg, "st").await.expect("握手成功");
         let (cmd_tx, cmd_rx) = mpsc::channel::<WsCommand>(8);
         let (event_tx, _event_rx) = mpsc::channel::<ClientEvent>(8);
+        let (kline_tx, _kline_rx) = broadcast::channel::<KlineUpdate>(8);
+        let subs: DashMap<(String, String), Vec<String>> = DashMap::new();
         let task = tokio::spawn(async move {
             let mut cmd_rx = cmd_rx;
             run_connection(
                 ws,
                 &mut cmd_rx,
                 &event_tx,
+                &kline_tx,
+                &subs,
+                "st",
                 Duration::from_millis(100),
                 Duration::from_millis(300),
+                Duration::from_secs(3600),
             )
             .await
         });
@@ -1360,5 +1782,88 @@ mod tests {
             .expect("任务应在通道关闭后退出")
             .unwrap();
         assert!(exit, "Pong 保活期间不得误判；通道关闭才返回 true");
+    }
+
+    /// 起一个本地 WS 服务：记录客户端发来的文本帧（断言周期重订用）。
+    async fn spawn_ws_frame_recorder() -> (String, mpsc::UnboundedReceiver<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}/ws", listener.local_addr().unwrap());
+        let (tx, rx) = mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(tcp).await.unwrap();
+            while let Some(Ok(msg)) = ws.next().await {
+                match msg {
+                    TMessage::Text(t) => {
+                        let _ = tx.send(t.to_string());
+                    }
+                    TMessage::Ping(p) => {
+                        let _ = ws.send(TMessage::Pong(p)).await;
+                    }
+                    _ => {}
+                }
+            }
+        });
+        (url, rx)
+    }
+
+    /// 服务端静默清订阅（连接仍存活）时，客户端必须按周期重发 subscribe_kline
+    /// 兜底，否则策略会静默收不到行情直到下一次重连。
+    #[tokio::test]
+    async fn periodic_resubscribe_resends_kline_frames() {
+        use std::time::Duration;
+        let (url, mut frames_rx) = spawn_ws_frame_recorder().await;
+        let cfg = TradingConfig {
+            ws_url: url,
+            request_timeout: Duration::from_secs(5),
+            submit_enabled: false,
+            reconnect_backoff_max_secs: 8,
+            strategy_secret: String::new(),
+        };
+        let ws = connect(&cfg, "futures_energy_chem")
+            .await
+            .expect("握手成功");
+        let subs: DashMap<(String, String), Vec<String>> = DashMap::new();
+        subs.insert(
+            ("futures_energy_chem".into(), "ctp".into()),
+            vec!["fu".into(), "bu".into()],
+        );
+        let (cmd_tx, mut cmd_rx) = mpsc::channel::<WsCommand>(8);
+        let (event_tx, _event_rx) = mpsc::channel::<ClientEvent>(8);
+        let (kline_tx, _kline_rx) = broadcast::channel::<KlineUpdate>(8);
+        let task = tokio::spawn(async move {
+            run_connection(
+                ws,
+                &mut cmd_rx,
+                &event_tx,
+                &kline_tx,
+                &subs,
+                "futures_energy_chem",
+                Duration::from_millis(200), // 心跳慢于重订周期，避免混入
+                Duration::from_millis(800),
+                Duration::from_millis(150),
+            )
+            .await
+        });
+
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(650);
+        let mut subscribe_frames = 0usize;
+        while tokio::time::Instant::now() < deadline {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            match tokio::time::timeout(remaining, frames_rx.recv()).await {
+                Ok(Some(text)) => {
+                    if text.contains("subscribe_kline") {
+                        subscribe_frames += 1;
+                    }
+                }
+                _ => break,
+            }
+        }
+        drop(cmd_tx);
+        let _ = tokio::time::timeout(Duration::from_secs(1), task).await;
+        assert!(
+            subscribe_frames >= 3,
+            "650ms 内应有初次订阅 + ≥2 次周期重订（150ms 周期），实际 {subscribe_frames} 帧"
+        );
     }
 }
