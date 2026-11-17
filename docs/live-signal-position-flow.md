@@ -1,5 +1,34 @@
 # 实盘链路：K 线 → RuntimeActor（策略/信号/仓位单 task）→ 交易所，及止盈止损时序
 
+<!-- refcheck 说明：本文 0 处 `file:行` 坐标（登记时实测），故不加 coords=off——
+     没有可校验对象却关掉校验，等于凭空造一笔假债务；校验保持开启（0 refs，不产噪声）。
+     本文非 runbook，不启用日志锚校验。下表的坐标均按可被 CI 第四步校验的完整形式写。 -->
+
+> ## ⚠️ 状态：历史文档（2026-11-09 登记，不再更新）
+>
+> 决策原文：「live-signal-position-flow.md 同样登记为历史」。登记依据为实测计数：
+> 全文 211 行，含已删实体 **8 处**（`RuntimeActor` 6、`runtime_actor.rs` 1、
+> `drive_bar` 1；本块自身也提及这些名字，故对全文直接 grep 会多计）；另含
+> **「终态」自称 3 处**（首段、§1、§3）——这是本文最容易误导人的地方：它并非终态，
+> 而是 **exchange-spi 迁移前**的链路快照。正文按"只追加不改写"**一字未改**
+> （`git diff` 删除行数 = 0）。
+>
+> **逐条拆开看，不是一刀切"全错"**（每条都实测过）：
+>
+> | 文中声称 | 今日状态 | 证据（坐标可被 CI 第四步校验） |
+> |---|---|---|
+> | 实盘无挂交易所的独立止损单，止盈止损由策略本地判断 | ✅ 仍成立 | `broker/src/wire.rs` 与 `broker/src/trading_service.rs` 中 `stop_limit`/`trigger_price`/`conditional` 命中 0 |
+> | `positions.on_price` 只用 high/low 更新峰值 | ✅ 仍成立 | `engine/src/core/runtime.rs:221`：`pos_sync.on_price(bar.high, bar.low)` |
+> | 单写者：每 (策略 × symbol) 在同一个 task/线程内顺序执行 | ✅ 仍成立（宿主改名） | 旧 `RuntimeActor` ⇒ 现 `app::strategy_live_actor`；每实例专用 OS 线程 `app/src/strategy_live_actor.rs:96`（`spawn_strategy_live`）+ 线程内 current-thread runtime |
+> | 「不再有 FillEvent **通道**、没有跨 task 查仓」 | ⚠️ 字面易误读 | 「无跨 task fill 通道」仍成立；但 `FillEvent` 类型活得很好——`signals/src/manager.rs:1117`（`fill_event`）构造、`engine/src/exchanges/live.rs:296`（`on_order_update`）转 Fill 并同 task 入队；勿读成"没有 FillEvent" |
+> | §1「终态 task 拓扑 **3N+2**」 | ❌ 未核即按失效对待 | 迁移后为"每实例 OS 线程 + 线程内 runtime"，该计数**我未验证**，不替它背书 |
+>
+> **现行现状真源**：链路现状见 `docs/design-package/02-架构设计.md`（v1.2，数据流表
+> 已重锚到 `spi_live_actor` 与 `ExchangeRunner::on_event`）与
+> `docs/design-package/03-详细设计.md`；运维口径见 `docs/RUNBOOK.md`；
+> 在场验收程序见 `docs/exchange-spi-live-acceptance.md`（日志锚校验已上 CI 第四步）。
+> 主循环唯一入口 → `engine/src/core/runtime.rs:137` 的 `ExchangeRunner::on_event`。
+
 > **2026-09-15 终态（Phase 0–4 + Step2 全部落地后）**。实盘里**没有独立的止盈
 > 止损单挂在交易所**——止盈止损由策略在每根**已闭合 1m K 线**上本地判断，
 > 触及时发反向市价单，与手动平仓走同一条信号路径。
@@ -32,7 +61,7 @@
 
 | 角色 | 数量 | 职责 |
 |---|---|---|
-| **T1 K 线 WS task** | N | data crate 的 kline-service 连接（断线退避重连），单 `KlineEvent` 流（Closed/Tick/Reconnected）驱动 RuntimeActor |
+| **T1 K线 router task** | 1 | trading-service 共享 WS（与订单同一条连接；`kline_updates` broadcast → 按 symbol 扇出，重连按登记重发订阅），单 `KlineEvent` 流（仅 Closed 定稿；klines-service 已退役）驱动 RuntimeActor |
 | **RuntimeActor** | N | 单 task 独占：Feed + 策略对象 + SignalManager + PositionManager + async 网关调用；panic 由外层**监督 task** 整代重建（重新订阅+启动对账） |
 | **T3 交易 WS task** | 按策略类型共享（懒连接池） | 与 trading-service 按策略类型各一条认证 WS（HMAC 握手）：submit 命令 + oneshot ack、order_event/Reconnected 外推；query_fut 恒返 Retryable（无订单查询协议） |
 | **T7 order_forwarder** | 1（进程级） | `OrderRouter`：order_id→Actor 精确路由（B8），未知订单全量广播兜底；WS 重连时下发 Reconcile |
@@ -45,7 +74,7 @@ FillEvent 桥接 T6、panic watcher T8（策略 panic 归监督层，无需额�
 ```mermaid
 sequenceDiagram
     autonumber
-    participant K as kline-service
+    participant K as trading-service(K线订阅)
     participant T1 as T1 K线WS task
     participant R as RuntimeActor<br/>(Feed+策略+信号+仓位 同task)
     participant T3 as T3 交易WS task

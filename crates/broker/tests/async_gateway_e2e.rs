@@ -8,16 +8,25 @@
 //! 注意：真实服务按 strategy_name 路由回调和订单事件——并行用例必须各自
 //! 使用互不相同的策略名（旧内嵌 mock 每测试一实例，无此约束）。
 //!
-//! 运行（先按 docs/RUNBOOK.md §2 起 trading-service + exchange-mock）：
+//! 运行（mock 拓扑：`--exchange binance=http://127.0.0.1:9200` 让本地模拟所
+//! 接管 `binance` 名——registry 中 xili provider 同名优先；账户保持样例
+//! `test_binance/exchange=binance`，见 docs/RUNBOOK.md §2/§4）：
 //!   TRADING_WS_URL=ws://127.0.0.1:9100/ws \
 //!     cargo test -p strategy-broker --test async_gateway_e2e -- --nocapture
 //!
 //! 覆盖：
-//! 1. intent → ack → order_event(filled) → FillEvent（订单号由服务端生成）
-//! 2. 平仓 intent（方向已反向）同链路成交
+//! 1. intent → ack → order_event(filled) → FillEvent（订单号由服务端生成）。
+//!    ⚠️ 开仓为金额单（order_cash）：xili 模拟器不推行情，服务端按契约
+//!    §5.1.1 拒「缺少可用参考价」⇒ 纯 mock 拓扑下用例 1/3 **运行时跳过并打印原因**
+//!    （具备行情的对端仍走全断言）。
+//! 2. 平仓 intent（quantity 帧，不受 §5.1.1 影响）同链路成交——mock 拓扑全断言。
 //! 3. submit 后对账：已 ack 在途单 query 得 Retryable，随后 order_event 补推成交
 //!    （要求 exchange-mock 成交间隔 ≥500ms，保证对账先于成交发生）
 //! 4. 冷启动 Submitted 在途：query Retryable，状态保留，不伪造成交
+//!
+//! 事件流口径：广播里除 FILLED 外还有 **ack 附带 OrderUpdate 帧**（客户端为
+//! 落账 exchange_order_id 有意转发），用例以事件泵（pump_until_fill）消费到
+//! fill 出现为止，不假设「第一帧即 FILLED」。
 
 use std::path::Path;
 use std::sync::atomic::{AtomicI64, Ordering};
@@ -29,7 +38,7 @@ use strategy_broker::{
     ClientEvent, OrderVenueCfg, TradingConfig, TradingGateway, TradingServiceClient,
 };
 use strategy_core::{FillEvent, IntentKind, Side, SignalIntent, SignalStatus};
-use strategy_signals::gateway::{AsyncOrderGateway, FailureKind};
+use strategy_signals::gateway::{AsyncOrderGateway, FailureKind, SubmitError};
 use strategy_signals::manager::RecoveryAction;
 use strategy_signals::{ManagedSignal, SignalManager};
 use strategy_store::{Clock, Store};
@@ -76,6 +85,7 @@ fn intent(strategy: &str, id: &str, side: Side, kind: IntentKind) -> SignalInten
         stop_order_id: None,
         created_event_time: Utc.with_ymd_and_hms(2026, 6, 10, 0, 0, 0).unwrap(),
         status: SignalStatus::Created,
+        offset: None,
     }
 }
 
@@ -88,22 +98,30 @@ struct Driver {
 }
 
 impl Driver {
-    async fn submit_intent(&mut self, intent: SignalIntent) -> String {
+    async fn submit_intent(&mut self, intent: SignalIntent) -> Result<String, SubmitError> {
         let Some(req) = self.manager.receive_intent_prepare(intent).unwrap() else {
             panic!("prepare 不应过滤该 intent");
         };
         let now = req.event_time;
         let outcome = self.gateway.submit_fut(&req.intent).await;
-        let order_id = outcome.expect("ack 应成功");
-        self.manager
-            .apply_submit_outcome(req, Ok(order_id.clone()))
-            .unwrap();
-        for rf in self.gateway.drain_ready_fills() {
-            if let Some(fill) = self.manager.apply_ready_fill(rf, now).unwrap() {
-                self.fill_tx.send(fill).await.ok();
+        match &outcome {
+            Ok(order_id) => {
+                self.manager
+                    .apply_submit_outcome(req, Ok(order_id.clone()))
+                    .unwrap();
+                for rf in self.gateway.drain_ready_fills() {
+                    if let Some(fill) = self.manager.apply_ready_fill(rf, now).unwrap() {
+                        self.fill_tx.send(fill).await.ok();
+                    }
+                }
+            }
+            Err(_) => {
+                self.manager
+                    .apply_submit_outcome(req, outcome.clone())
+                    .unwrap();
             }
         }
-        order_id
+        outcome
     }
 
     async fn handle_client_event(&mut self, ev: ClientEvent) {
@@ -154,11 +172,39 @@ impl Driver {
         }
     }
 
-    async fn next_fill(&mut self, label: &str) -> FillEvent {
-        tokio::time::timeout(Duration::from_secs(15), self.fill_rx.recv())
-            .await
-            .unwrap_or_else(|_| panic!("等待成交超时：{label}"))
-            .expect("fill 通道不应关闭")
+    /// 事件泵：持续消费广播直到出现 fill。广播流上还有 **ack 附带帧**（服务端
+    /// 落账 exchange_order_id 用，见 trading_service.rs「ack 附带 OrderUpdate」），
+    /// FILLED 不再是第一帧——旧「单帧」假设已被客户端落账行为证伪（smoke 实测
+    /// 同一 cid 先 Ack 后 Filled 两帧都在流上）。超时 15s 沿用原口径。
+    async fn pump_until_fill(&mut self, label: &str) -> FillEvent {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+        loop {
+            tokio::select! {
+                ev = self.events.recv() => {
+                    let ev = ev.expect("事件流不应关闭");
+                    self.handle_client_event(ev).await;
+                }
+                f = self.fill_rx.recv() => return f.expect("fill 通道不应关闭"),
+                _ = tokio::time::sleep_until(deadline) => panic!("等待成交超时：{label}"),
+            }
+        }
+    }
+}
+
+/// 金额单在纯 mock 拓扑的**契约已知限制**（contracts/trading-service.md §5.1.1：
+/// xili 模拟器不推行情 ⇒ 服务端 `order_cash 换算失败：缺少可用参考价` 按设计拒绝）
+/// ⇒ 运行时打印原因并跳过，与 `TRADING_WS_URL` 未设门控同一模式；
+/// 具备行情的对端（真实联调）仍走完整 ack→FILLED→fill 断言。
+/// 返回 Some(()) 表示应跳过；其他拒绝 = 真回归，调用方必须炸。
+fn mock_cash_limit_skip(err: &SubmitError, case: &str) -> bool {
+    if err.kind == FailureKind::Rejected && err.message.contains("缺少可用参考价") {
+        eprintln!(
+            "跳过 {case}：exchange-mock 无行情推送，金额单按契约 §5.1.1 拒（服务端: {}）",
+            err.message
+        );
+        true
+    } else {
+        false
     }
 }
 
@@ -201,14 +247,23 @@ async fn open_intent_ack_then_filled_event_produces_fill() {
     let dir = tempfile::tempdir().unwrap();
     let mut drv = spawn_driver(url, dir.path(), "e2e_open");
 
-    let order_id = drv
+    let order_id = match drv
         .submit_intent(intent(
             "e2e_open",
             "sig_open_1",
             Side::Long,
             IntentKind::Open,
         ))
-        .await;
+        .await
+    {
+        Ok(id) => id,
+        Err(e) => {
+            if mock_cash_limit_skip(&e, "open_intent_ack_then_filled_event_produces_fill") {
+                return;
+            }
+            panic!("ack 应成功（非 §5.1.1 已知限制）: {e:?}");
+        }
+    };
     assert!(order_id.starts_with("0x"), "服务端订单号应为 0x 开头");
 
     // 先吃掉建连时的 Reconnected（submit 触发了懒建连）。
@@ -218,13 +273,7 @@ async fn open_intent_ack_then_filled_event_produces_fill() {
         .unwrap();
     assert!(matches!(connected, ClientEvent::Reconnected { .. }));
 
-    let ev = tokio::time::timeout(Duration::from_secs(10), drv.events.recv())
-        .await
-        .expect("等待 order_event 超时")
-        .unwrap();
-    drv.handle_client_event(ev).await;
-
-    let fill = drv.next_fill("开仓").await;
+    let fill = drv.pump_until_fill("开仓").await;
     assert_eq!(fill.signal_id, "sig_open_1");
     assert_eq!(fill.order_id, order_id);
     assert!((fill.filled_size - 1.0).abs() < 1e-9);
@@ -241,6 +290,7 @@ async fn close_intent_uses_same_place_order_path_and_fills() {
     let mut drv = spawn_driver(url, dir.path(), "e2e_close");
 
     // 平多：direction=Short，与开仓同一 place_order 帧，仅 side 不同。
+    // quantity 平仓帧不受 §5.1.1 金额单限制影响，mock 拓扑必须全链路走通。
     let order_id = drv
         .submit_intent(intent(
             "e2e_close",
@@ -248,7 +298,8 @@ async fn close_intent_uses_same_place_order_path_and_fills() {
             Side::Short,
             IntentKind::Close,
         ))
-        .await;
+        .await
+        .expect("ack 应成功（quantity 平仓帧）");
 
     // 先 drain Reconnected。
     let _connected = tokio::time::timeout(Duration::from_secs(10), drv.events.recv())
@@ -256,13 +307,7 @@ async fn close_intent_uses_same_place_order_path_and_fills() {
         .unwrap()
         .unwrap();
 
-    let ev = tokio::time::timeout(Duration::from_secs(10), drv.events.recv())
-        .await
-        .unwrap()
-        .unwrap();
-    drv.handle_client_event(ev).await;
-
-    let fill = drv.next_fill("平仓").await;
+    let fill = drv.pump_until_fill("平仓").await;
     assert_eq!(fill.signal_id, "sig_close_1");
     assert_eq!(fill.order_id, order_id);
     assert_eq!(fill.direction, Side::Short);
@@ -277,9 +322,21 @@ async fn acknowledged_inflight_survives_reconcile_until_fill_pushed() {
     let dir = tempfile::tempdir().unwrap();
     let mut drv = spawn_driver(url, dir.path(), "e2e_rec");
 
-    let order_id = drv
+    let order_id = match drv
         .submit_intent(intent("e2e_rec", "sig_rec_1", Side::Long, IntentKind::Open))
-        .await;
+        .await
+    {
+        Ok(id) => id,
+        Err(e) => {
+            if mock_cash_limit_skip(
+                &e,
+                "acknowledged_inflight_survives_reconcile_until_fill_pushed",
+            ) {
+                return;
+            }
+            panic!("ack 应成功（非 §5.1.1 已知限制）: {e:?}");
+        }
+    };
 
     // 先 drain Reconnected（不调 handle_client_event，避免提前 reconcile）。
     let _connected = tokio::time::timeout(Duration::from_secs(10), drv.events.recv())
@@ -291,12 +348,7 @@ async fn acknowledged_inflight_survives_reconcile_until_fill_pushed() {
     let premature = tokio::time::timeout(Duration::from_millis(150), drv.fill_rx.recv()).await;
     assert!(premature.is_err(), "对账不得伪造成交");
 
-    let ev = tokio::time::timeout(Duration::from_secs(15), drv.events.recv())
-        .await
-        .unwrap()
-        .unwrap();
-    drv.handle_client_event(ev).await;
-    let fill = drv.next_fill("延迟成交").await;
+    let fill = drv.pump_until_fill("延迟成交").await;
     assert_eq!(fill.order_id, order_id);
     assert_eq!(fill.signal_id, "sig_rec_1");
 }

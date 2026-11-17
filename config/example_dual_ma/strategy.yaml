@@ -1,0 +1,23 @@
+# example_dual_ma — 单标双均线教学样例（统一端口 strategy.yaml，N=1）
+# 原 per-symbol BTCUSDT.yaml 已迁移；CU 期货样例见 config/example_dual_ma_cu/。
+strategy_type: example_dual_ma
+strategy_id: example_dual_ma:btc
+
+universe:
+  - { symbol: BTCUSDT, exchange: binance }
+
+timeframes: [4h, 1m] # [0] = base TF（决策节奏，对齐旧 timeframe: 4h）
+
+indicators: {}
+entry: { default: [] }
+exit: { default: [] }
+
+portfolio_exit: { stop_loss_pct: 8 }
+risk: { max_total_notional: 1.0 }
+sizing: { per_position_pct: 1.0 } # 回测全仓；live 的每单名义仍取 _global.yaml 的 cash
+
+params:
+  fast_period: 10
+  slow_period: 30
+  stop_loss_pct: 2.0
+  exit_price_source: close

@@ -1,0 +1,9 @@
+# example_dual_ma 组基线（live / paper / backtest 共用）
+mode: paper_trading
+warmup_days: 30
+cash: 200.0 # live 每单名义（USDT）
+
+services:
+  trading:
+    exchange: binance
+    account: example_account

@@ -23,5 +23,15 @@ jobs:
         run: cargo fmt --all -- --check
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
+      # --no-fail-fast：一个 test binary 失败不中止其余套件，避免同因失败被
+      # 首个报错遮住（曾出现 5 个用例同因失败只看到 1 个）。
       - name: Test
-        run: cargo test --all
+        run: cargo test --all --no-fail-fast
+      # 第四步：引用坐标与日志锚校验（fmt/clippy/test 都只看代码，抓不到文档坐标）。
+      # 校验 docs/**.md 与 crates/**.rs 注释里的 `file:行` 是否可解析、不歧义、不越界，
+      # 并对声明 `refcheck:anchors=on` 的 runbook 校验其日志锚确实存在于源码。
+      # 豁免必须显式：行内 `refcheck:ignore` 或文件头 `refcheck:coords=off`（账本类
+      # 文档引用已删实现的历史坐标时用后者，退出时会打印关闭清单，债务可见）。
+      # 本步失败的唯一正确修法是改坐标/改锚，不是加豁免——豁免清单会被 review 盯。
+      - name: Doc refs
+        run: python3 -I scripts/check_doc_refs.py
