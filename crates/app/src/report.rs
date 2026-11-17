@@ -5,10 +5,14 @@
 //! - [`TradeRow`]     `NAME="trade"`：一次成交一行（只增不改），id=trade_{signal_id}
 //! - [`EquityPoint`]  `NAME="equity"`：净值点，kind=daily|tf（同桶 upsert 刷新）
 //!
-//! 旧的 backtest_trades.csv / backtest_equity.csv / {tf}_equity.csv
-//! 三张固定列 CSV 已废弃；result.json / backtest_report.txt /
-//! backtest_analysis_report.md / charts/*.png 作为回测报告产物保留，
-//! 其数据全部从 Store 行汇总（目录结构仍对齐 Python run_backtest.py）。
+//! 成交/净值的主口径落 Store（`state/{day}/trade.csv`、`equity.csv`）；
+//! `backtest_equity.csv` / `backtest_trades.csv` 作为**扁平报表导出仍产出**
+//! （`write_flat_exports`，对齐外部参考格式，钉于本文件测试与
+//! `tests/backtest_e2e.rs`），有信号时另附 `backtest_signals.csv` 副本。
+//! 只有旧的 `{tf}_equity.csv`（按周期分文件）不再产出。result.json /
+//! backtest_report.txt / backtest_analysis_report.md / charts/*.png 作为回测
+//! 报告产物保留，其数据全部从 Store 行汇总（目录结构仍对齐 Python
+//! run_backtest.py）。
 //!
 //! 指标口径逐条照搬 Python `_compute_metrics`（sharpe=日收益×√252、
 //! 年化=(1+r)^(365/天数)−1、胜率只统计 pnl≠0 的平仓单）。
@@ -104,6 +108,11 @@ impl Model for TradeRow {
     fn id(&self) -> &str {
         &self.id
     }
+
+    /// P1-7：共享表二级索引键——多策略同表时按策略名快速过滤。
+    fn scope(&self) -> Option<&str> {
+        Some(&self.strategy_name)
+    }
 }
 
 /// 净值点（Store `equity` model 一行）。
@@ -130,6 +139,11 @@ impl Model for EquityPoint {
 
     fn id(&self) -> &str {
         &self.id
+    }
+
+    /// P1-7：共享表二级索引键——多策略同表时按策略名快速过滤。
+    fn scope(&self) -> Option<&str> {
+        Some(&self.strategy_name)
     }
 }
 
@@ -415,6 +429,8 @@ impl ReportGenerator {
     }
 
     /// 生成全部产物（图表失败仅告警，不阻断）
+    ///
+    /// `venue_key` = §6.1 命名空间键（本地 K 线数据路径维度，图表读数以它为准）。
     #[allow(clippy::too_many_arguments)]
     pub fn generate(
         &self,
@@ -424,6 +440,7 @@ impl ReportGenerator {
         end_date: &str,
         initial_cash: f64,
         data_dir: &Path,
+        venue_key: &str,
         tf_key: &str,
         daily_equity: &[EquityPoint],
         tf_equity: &[EquityPoint],
@@ -440,8 +457,9 @@ impl ReportGenerator {
             let _ = fs::write(self.run_dir.join("config.yaml"), yaml);
         }
 
-        // S5：成交/净值只落统一 Store（state/{day}/trade.csv、equity.csv），
-        // 不再写 backtest_trades.csv / backtest_equity.csv / {tf}_equity.csv。
+        // S5：成交/净值主口径落统一 Store（state/{day}/trade.csv、equity.csv）；
+        // 下方 write_flat_exports 仍产出 backtest_equity.csv / backtest_trades.csv
+        // 两份扁平报表导出（外部脚本消费），仅旧的 {tf}_equity.csv 不再产出。
 
         // 1. 指标（从 Store 行汇总）
         let metrics = compute_metrics(initial_cash, daily_equity, trades);
@@ -495,14 +513,104 @@ impl ReportGenerator {
             daily_equity,
             tf_equity,
             data_dir,
+            venue_key,
             start_date,
             end_date,
         ) {
             tracing::warn!(error = %e, "图表生成失败（跳过 charts/）");
         }
-        self.write_analysis_report(symbol, daily_equity, &metrics);
+        self.write_analysis_report(symbol, daily_equity, &metrics, initial_cash);
+
+        // 7. 扁平导出（backtest_equity / backtest_trades / backtest_signals）
+        if let Err(e) = self.write_flat_exports(daily_equity, trades) {
+            tracing::warn!(error = %e, "扁平导出失败（backtest_*.csv）");
+        }
 
         Ok(self.run_dir.to_path_buf())
+    }
+
+    /// 旧版三件套扁平导出（对齐外部参考格式）：
+    /// - `backtest_equity.csv`：date,equity,cash（daily 净值）
+    /// - `backtest_trades.csv`：trade_id,strategy_id,symbol,side,quantity,price,
+    ///   commission,slippage,pnl,timestamp,comment
+    /// - `backtest_signals.csv`：engine/signals/{name}/signal.csv 的扁平副本
+    ///   （14 列 SignalRecord 口径；无信号时不生成）
+    fn write_flat_exports(
+        &self,
+        daily_equity: &[EquityPoint],
+        trades: &[TradeRow],
+    ) -> io::Result<()> {
+        use std::collections::BTreeMap;
+
+        // equity：按日期去重（BTreeMap 按日期升序；同日后行覆盖前行）
+        let mut eq: BTreeMap<String, (String, String)> = BTreeMap::new();
+        for r in daily_equity {
+            if r.kind == "daily" {
+                eq.insert(
+                    r.label.clone(),
+                    (Self::fmt_num(r.equity), Self::fmt_num(r.cash)),
+                );
+            }
+        }
+        let mut w = csv::Writer::from_path(self.run_dir.join("backtest_equity.csv"))?;
+        w.write_record(["date", "equity", "cash"])?;
+        for (date, (e, c)) in &eq {
+            w.write_record([date, e, c])?;
+        }
+        w.flush()?;
+
+        // trades
+        let mut w = csv::Writer::from_path(self.run_dir.join("backtest_trades.csv"))?;
+        w.write_record([
+            "trade_id",
+            "strategy_id",
+            "symbol",
+            "side",
+            "quantity",
+            "price",
+            "commission",
+            "slippage",
+            "pnl",
+            "timestamp",
+            "comment",
+        ])?;
+        for t in trades {
+            w.write_record([
+                &t.trade_id,
+                &t.strategy_id,
+                &t.symbol,
+                &t.side,
+                &Self::fmt_num(t.quantity),
+                &Self::fmt_num(t.price),
+                &Self::fmt_num(t.commission),
+                &Self::fmt_num(t.slippage),
+                &Self::fmt_num(t.pnl),
+                &t.timestamp,
+                &t.comment,
+            ])?;
+        }
+        w.flush()?;
+
+        // signals：复制 engine/signals/{name}/signal.csv（含 header，无则不生成）
+        let src = self.run_dir.join("engine").join("signals");
+        if let Ok(entries) = fs::read_dir(&src) {
+            for e in entries.flatten() {
+                let f = e.path().join("signal.csv");
+                if f.exists() {
+                    return fs::copy(&f, self.run_dir.join("backtest_signals.csv")).map(|_| ());
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// 数值输出：整数不带小数点，否则原样（对齐 signals::writer::fmt_f64 口径）
+    fn fmt_num(v: f64) -> String {
+        if v == v.trunc() && v.abs() < 1e15 {
+            format!("{}", v as i64)
+        } else {
+            format!("{v}")
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -544,11 +652,13 @@ impl ReportGenerator {
         let accounts = json!([{
             "strategy_id": strategy_id,
             "cash": final_cash(daily_equity, initial_cash),
+            // 引擎不设冻结/保证金科目（现金台账只记已实现盈亏），故如实为 0；
+            // 持仓是否在手由下面 position_count 表达，勿再用"末必空仓"假设。
             "frozen_cash": 0.0,
             "total_equity": daily_equity.last().map(|r| r.equity).unwrap_or(initial_cash),
             "peak_equity": peak_equity,
             "max_drawdown": metrics.max_drawdown,
-            "position_count": 0,
+            "position_count": end_positions(trades).0,
             "trade_count": trades.len(),
         }]);
         let result = json!({
@@ -576,7 +686,7 @@ impl ReportGenerator {
     fn write_report_txt(
         &self,
         strategy_id: &str,
-        _symbol: &str,
+        symbol: &str,
         start_date: &str,
         end_date: &str,
         initial_cash: f64,
@@ -609,14 +719,40 @@ impl ReportGenerator {
             .last()
             .map(|r| r.equity)
             .unwrap_or(initial_cash);
+        let final_cash = final_cash(daily_equity, initial_cash);
+        let (pos_count, long_qty, short_qty) = end_positions(trades);
+        let total_commission = trades.iter().fold(0.0_f64, |acc, t| acc + t.commission);
         lines.push("账户摘要".into());
         lines.push(dash.clone());
         lines.push(format!("  策略：{strategy_id}"));
         lines.push(format!("    期末权益：    {}", fmt_comma(final_eq, 2)));
-        lines.push(format!("    可用现金：    {}", fmt_comma(final_eq, 2)));
-        lines.push("    持仓保证金：  0.00".into());
+        // 可用现金必须印**现金台账**的数，不是期末权益的副本：窗口末段常有未平仓单
+        // （此时 equity = cash + 浮动盈亏），旧写法把两个不同科目印成同一个数。
+        lines.push(format!("    可用现金：    {}", fmt_comma(final_cash, 2)));
+        // 原「持仓保证金：0.00」为硬编码占位、且与未平仓事实矛盾，改印可由流水推导的两项。
+        lines.push(format!(
+            "    期末持仓：    {} 笔（{}）",
+            pos_count,
+            if pos_count == 0 {
+                "空仓".to_string()
+            } else {
+                let mut parts = Vec::new();
+                if long_qty > 0.0 {
+                    parts.push(format!("多 {}", fmt_comma(long_qty, 6)));
+                }
+                if short_qty > 0.0 {
+                    parts.push(format!("空 {}", fmt_comma(short_qty, 6)));
+                }
+                parts.join(" / ")
+            }
+        ));
+        lines.push(format!("    未实现盈亏：  {:+.2}", final_eq - final_cash));
         lines.push(format!("    最大回撤：    {:.2}%", max_dd * 100.0));
         lines.push(format!("    交易次数：    {}", trades.len()));
+        lines.push(format!(
+            "    总手续费：    {}",
+            fmt_comma(total_commission, 2)
+        ));
         lines.push(String::new());
 
         lines.push("绩效指标".into());
@@ -662,7 +798,19 @@ impl ReportGenerator {
 
         lines.push("期末持仓".into());
         lines.push(dash.clone());
-        lines.push("  无持仓".into());
+        // 与账户摘要同一份流水推导（end_positions）：在途则列 标的+方向+数量，
+        // 空仓才印「无持仓」。此前本段体硬编码「无持仓」——7ae0464 修了摘要/现金/
+        // 保证金三处占位，这里是漏网的第四处，CU 实跑（末段在途多 1 手）自相矛盾暴露。
+        if pos_count == 0 {
+            lines.push("  无持仓".into());
+        } else {
+            if long_qty > 0.0 {
+                lines.push(format!("  {symbol}  多 {}", fmt_comma(long_qty, 6)));
+            }
+            if short_qty > 0.0 {
+                lines.push(format!("  {symbol}  空 {}", fmt_comma(short_qty, 6)));
+            }
+        }
         lines.push(String::new());
 
         lines.push("最近交易记录（最多 20 条）".into());
@@ -698,11 +846,17 @@ impl ReportGenerator {
         fs::write(self.run_dir.join("backtest_report.txt"), lines.join("\n"))
     }
 
-    fn write_analysis_report(&self, symbol: &str, daily_equity: &[EquityPoint], m: &Metrics) {
+    fn write_analysis_report(
+        &self,
+        symbol: &str,
+        daily_equity: &[EquityPoint],
+        m: &Metrics,
+        initial_cash: f64,
+    ) {
         let Some(first) = daily_equity.first() else {
             return;
         };
-        // 峰值/谷值（对齐 analyzer.py：全局 max/min）
+        // 峰值/谷值（全局 max/min，沿用 analyzer.py 的取样口径，但**不再叫最大回撤**）
         let peak_row = daily_equity
             .iter()
             .max_by(|a, b| a.equity.total_cmp(&b.equity))
@@ -711,20 +865,38 @@ impl ReportGenerator {
             .iter()
             .min_by(|a, b| a.equity.total_cmp(&b.equity))
             .unwrap_or(first);
-        // analyzer.py 的回撤口径：(peak-trough)/peak（全局极值差，非 rolling peak）
-        let analyzer_dd = if peak_row.equity > 0.0 {
+        // analyzer.py 的原始口径：(全局峰 − 全局谷)/全局峰。
+        // 它不是回撤——谷值可以出现在峰值**之前**（BTCUSDT 4h 实跑：谷 2024-01-04
+        // 早于峰 2024-03-04 ⇒ "35.17%" 而真回撤只有 7.43%，风险被夸大约 4.7 倍）。
+        // 数值保留为"权益振幅"，最大回撤一律用滚动峰谷口径（与 result.json 同源）。
+        let amplitude = if peak_row.equity > 0.0 {
             (peak_row.equity - trough_row.equity) / peak_row.equity * 100.0
         } else {
             0.0
+        };
+        let drawdown = m.max_drawdown * 100.0;
+        // 谷值早于峰值 ⇒ 振幅必大于回撤，此时值得对读者明说，避免拿振幅当回撤去比策略
+        let amplitude_note = if trough_row.bucket_secs < peak_row.bucket_secs
+            && amplitude > drawdown + 1e-9
+        {
+            format!(
+                "\n> ⚠️ 谷值（{trough_d}）早于峰值（{peak_d}）：权益振幅 {amp:.2}% 大于最大回撤 {dd:.2}%，两者口径不同，比较策略时请用**最大回撤**。\n",
+                trough_d = trough_row.label,
+                peak_d = peak_row.label,
+                amp = amplitude,
+                dd = drawdown
+            )
+        } else {
+            String::new()
         };
         let verdict = if m.total_return > 0.0 {
             "盈利"
         } else {
             "亏损"
         };
-        let risk = if analyzer_dd < 20.0 {
+        let risk = if drawdown < 20.0 {
             "风险较低"
-        } else if analyzer_dd < 40.0 {
+        } else if drawdown < 40.0 {
             "风险中等"
         } else {
             "风险较高"
@@ -742,10 +914,12 @@ impl ReportGenerator {
 | 指标 | 值 |
 |------|------|
 | 回测天数 | {days} |
-| 初始权益 | {init} |
+| 初始资金（收益基准） | {base} |
+| 首日权益样本 | {init} |
 | 期末权益 | {final} |
-| 总收益率 | {tr:.2}% |
-| 最大回撤 | {dd:.2}% |
+| 总收益率（期末权益 ÷ 初始资金 − 1） | {tr:.2}% |
+| 最大回撤（滚动峰谷） | {dd:.2}% |
+| 权益振幅（全局峰谷差，非回撤） | {amp:.2}% |
 
 ---
 
@@ -765,7 +939,7 @@ impl ReportGenerator {
 | 峰值日期 | {peak_d} |
 | 谷值权益 | {trough} |
 | 谷值日期 | {trough_d} |
-
+{note}
 ---
 
 ## 4. 分析结论
@@ -779,14 +953,17 @@ impl ReportGenerator {
 "#,
             now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
             days = m.trading_days,
+            base = fmt_comma(initial_cash, 2),
             init = fmt_comma(first.equity, 2),
             final = fmt_comma(daily_equity.last().map(|r| r.equity).unwrap_or(0.0), 2),
             tr = m.total_return * 100.0,
-            dd = analyzer_dd,
+            dd = drawdown,
+            amp = amplitude,
             peak = fmt_comma(peak_row.equity, 2),
             peak_d = peak_row.label,
             trough = fmt_comma(trough_row.equity, 2),
             trough_d = trough_row.label,
+            note = amplitude_note,
             verdict = verdict,
             risk = risk,
         );
@@ -794,9 +971,40 @@ impl ReportGenerator {
     }
 }
 
-/// result.json accounts.cash：期末现金（回测末通常空仓 → 等于期末权益）
+/// result.json accounts.cash：期末现金（现金台账只记已实现盈亏，空仓时等于期末权益）
 fn final_cash(daily_equity: &[EquityPoint], initial_cash: f64) -> f64 {
     daily_equity.last().map(|r| r.cash).unwrap_or(initial_cash)
+}
+
+/// 期末在途持仓：由成交流水推导，**不是硬编码 0**。
+///
+/// 方向语义取自 `spi_backtest::fills_to_trade_rows`：开多 `BUY`、平多 `SELL_CLOSE`、
+/// 开空 `SELL`、平空 `BUY_CLOSE`。返回 `(笔数, 多量, 空量)`，空仓时为 `(0, 0.0, 0.0)`。
+///
+/// 为什么要有这个函数：回测窗口结束时最后一段仓位常未平仓（BTCUSDT 4h 实跑最后一笔
+/// `BUY` 在 2024-03-24，窗口 03-31 收），此前 `position_count`/可用现金/持仓保证金
+/// 三处都按"末必空仓"写死，于是同一份产物自相矛盾——`equity 7,363.10 ≠ cash 6,939.69`
+/// 却报 0 笔持仓、现金印成权益。逐日核验后确认权益序列是对的
+/// （浮动盈亏 = 净量 ×(当日末 1m 收盘 − 开仓价)，03-29/03-31 分别 272.77/423.41 全对上），
+/// **错的是报表占位值**，故此处只改报表口径，不动引擎记账。
+fn end_positions(trades: &[TradeRow]) -> (usize, f64, f64) {
+    let (mut long, mut short) = (0.0_f64, 0.0_f64);
+    for t in trades {
+        match t.side.as_str() {
+            "BUY" => long += t.quantity,
+            "SELL_CLOSE" => long -= t.quantity,
+            "SELL" => short += t.quantity,
+            "BUY_CLOSE" => short -= t.quantity,
+            // 未知标签（外部注入/新方向）不猜方向，宁可由下面的空仓判定暴露
+            _ => {}
+        }
+    }
+    // 1e-9 容差：浮点累加的整进整出不应留残余仓位（与 remote_matches_local 同口径）
+    let eps = 1e-9;
+    let l = long.max(0.0);
+    let s = short.max(0.0);
+    let (l, s) = (if l > eps { l } else { 0.0 }, if s > eps { s } else { 0.0 });
+    ((l > 0.0) as usize + (s > 0.0) as usize, l, s)
 }
 
 /// 千分位格式化（对齐 Python `{v:,.2f}`）：1234567.891 → "1,234,567.89"
@@ -1095,7 +1303,9 @@ mod tests {
     fn report_generator_no_longer_writes_legacy_csvs() {
         let dir = tempfile::tempdir().unwrap();
         let g = ReportGenerator::new(dir.path());
-        // 空输入也能产出报告；旧三张 CSV 文件名不得出现
+        // 空输入也能产出报告；旧 {tf}_equity.csv 不再产出。
+        // backtest_equity/backtest_trades 已恢复为扁平导出（空输入生成仅含 header 的文件），
+        // backtest_signals 无信号时不生成。
         g.generate(
             "s",
             "BTCUSDT",
@@ -1103,6 +1313,7 @@ mod tests {
             "2026-01-02",
             1000.0,
             Path::new("."),
+            "binance/crypto_perpetual/BTCUSDT",
             "1h",
             &[],
             &[],
@@ -1113,13 +1324,386 @@ mod tests {
             None,
         )
         .unwrap();
-        for stale in [
-            "backtest_equity.csv",
-            "backtest_trades.csv",
-            "1h_equity.csv",
-        ] {
-            assert!(!dir.path().join(stale).exists(), "{stale} 不应再产出");
+        assert!(
+            !dir.path().join("1h_equity.csv").exists(),
+            "1h_equity.csv 不应再产出"
+        );
+        for flat in ["backtest_equity.csv", "backtest_trades.csv"] {
+            assert!(dir.path().join(flat).exists(), "{flat} 应始终产出");
         }
+        assert!(
+            !dir.path().join("backtest_signals.csv").exists(),
+            "无信号时 backtest_signals.csv 不生成"
+        );
         assert!(dir.path().join("backtest_result.json").exists());
+    }
+
+    /// 扁平导出内容核验：equity 按日去重升序、trades 全列、signals 复制 signal.csv
+    #[test]
+    fn flat_exports_contents() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = ReportGenerator::new(dir.path());
+        let eq = vec![day("2026-01-01", 1000.0), day("2026-01-02", 1010.5)];
+        let trades = vec![
+            TradeRow::new(
+                1,
+                "st",
+                "S",
+                "CU",
+                "BUY",
+                0.5,
+                100.0,
+                0.25,
+                0.0,
+                0.0,
+                "2026-01-01T00:00:00",
+                "open",
+                "sig_a",
+            ),
+            TradeRow::new(
+                2,
+                "st",
+                "S",
+                "CU",
+                "SELL_CLOSE",
+                0.5,
+                101.0,
+                0.25,
+                0.0,
+                0.5,
+                "2026-01-02T00:00:00",
+                "close",
+                "sig_b",
+            ),
+        ];
+        // 准备一份 signal.csv 供复制
+        let sig_dir = dir.path().join("engine").join("signals").join("st");
+        std::fs::create_dir_all(&sig_dir).unwrap();
+        std::fs::write(
+            sig_dir.join("signal.csv"),
+            "strategy_name,signal_id\nst,sig_a\n",
+        )
+        .unwrap();
+
+        g.generate(
+            "st",
+            "CU",
+            "2026-01-01",
+            "2026-01-02",
+            1000.0,
+            Path::new("."),
+            "binance/cn_futures/CU",
+            "2h",
+            &eq,
+            &[],
+            &trades,
+            10,
+            t(2026, 1, 1),
+            t(2026, 1, 2),
+            None,
+        )
+        .unwrap();
+
+        let eq_csv = std::fs::read_to_string(dir.path().join("backtest_equity.csv")).unwrap();
+        assert_eq!(
+            eq_csv,
+            "date,equity,cash\n2026-01-01,1000,1000\n2026-01-02,1010.5,1010.5\n"
+        );
+        let tr_csv = std::fs::read_to_string(dir.path().join("backtest_trades.csv")).unwrap();
+        assert!(tr_csv.starts_with("trade_id,strategy_id,symbol,side,quantity,price,commission,slippage,pnl,timestamp,comment\n"));
+        assert!(tr_csv.contains("T00000001,S,CU,BUY,0.5,100,0.25,0,0,2026-01-01T00:00:00,open"));
+        assert!(tr_csv
+            .contains("T00000002,S,CU,SELL_CLOSE,0.5,101,0.25,0,0.5,2026-01-02T00:00:00,close"));
+        let sig_csv = std::fs::read_to_string(dir.path().join("backtest_signals.csv")).unwrap();
+        assert_eq!(sig_csv, "strategy_name,signal_id\nst,sig_a\n");
+        // 报告账户摘要必须包含总手续费（两笔成交各 0.25）
+        let report = std::fs::read_to_string(dir.path().join("backtest_report.txt")).unwrap();
+        assert!(
+            report.contains("总手续费：    0.50"),
+            "backtest_report.txt 缺少总手续费字段: {report}"
+        );
+    }
+
+    /// 现金 ≠ 权益时的净值样本（`day()` 把两者写死相等，正是旧缺陷漏网的原因）
+    fn day_cash(date: &str, equity: f64, cash: f64) -> EquityPoint {
+        let d = chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d").unwrap();
+        let secs = Utc
+            .from_utc_datetime(&d.and_hms_opt(0, 0, 0).unwrap())
+            .timestamp();
+        EquityPoint {
+            id: daily_equity_id("st", date),
+            strategy_name: "st".into(),
+            kind: "daily".into(),
+            label: date.into(),
+            bucket_secs: secs,
+            equity,
+            cash,
+        }
+    }
+
+    fn row(side: &str, qty: f64, price: f64, pnl: f64) -> TradeRow {
+        TradeRow::new(
+            1,
+            "st",
+            "S",
+            "BTCUSDT",
+            side,
+            qty,
+            price,
+            0.0,
+            0.0,
+            pnl,
+            "2026-01-02T00:00:00",
+            "",
+            "sig_x",
+        )
+    }
+
+    #[test]
+    fn end_positions_derives_open_quantity_from_ledger() {
+        // 全平 → 0 笔（浮点整进整出不留残渣）
+        let flat = vec![
+            row("BUY", 0.5, 100.0, 0.0),
+            row("SELL_CLOSE", 0.5, 101.0, 0.5),
+        ];
+        assert_eq!(end_positions(&flat), (0, 0.0, 0.0));
+        // 末笔开多在途
+        let open_long = vec![
+            row("BUY", 0.5, 100.0, 0.0),
+            row("SELL_CLOSE", 0.5, 101.0, 0.5),
+            row("BUY", 0.3, 102.0, 0.0),
+        ];
+        assert_eq!(end_positions(&open_long).0, 1);
+        assert!((end_positions(&open_long).1 - 0.3).abs() < 1e-12);
+        // 末笔开空在途（空头落在第三位）
+        let open_short = vec![
+            row("SELL", 0.7, 100.0, 0.0),
+            row("BUY_CLOSE", 0.2, 99.0, 0.2),
+        ];
+        let (n, long, short) = end_positions(&open_short);
+        assert_eq!(n, 1);
+        assert_eq!(long, 0.0);
+        assert!((short - 0.5).abs() < 1e-12);
+        // 多空各一笔在途 ⇒ 2 笔
+        let both = vec![row("BUY", 0.4, 100.0, 0.0), row("SELL", 0.6, 100.0, 0.0)];
+        assert_eq!(end_positions(&both), (2, 0.4, 0.6));
+    }
+
+    /// 窗口末段未平仓时，报表三个科目必须各自为真：现金印现金、持仓数非 0、
+    /// 权益−现金 = 未实现盈亏（旧写法把可用现金印成期末权益、持仓写死 0 笔）。
+    #[test]
+    fn open_position_at_end_is_reported_truthfully() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = ReportGenerator::new(dir.path());
+        let eq = vec![
+            day_cash("2026-01-01", 1000.0, 1000.0),
+            day_cash("2026-01-02", 1150.0, 1100.0),
+        ];
+        let trades = vec![
+            row("BUY", 0.5, 1000.0, 0.0),
+            row("SELL_CLOSE", 0.5, 1200.0, 100.0),
+            row("BUY", 0.5, 1200.0, 0.0), // 在途，未平
+        ];
+        g.generate(
+            "st",
+            "BTCUSDT",
+            "2026-01-01",
+            "2026-01-02",
+            1000.0,
+            Path::new("."),
+            "binance/crypto_perpetual/BTCUSDT",
+            "2h",
+            &eq,
+            &[],
+            &trades,
+            10,
+            t(2026, 1, 1),
+            t(2026, 1, 2),
+            None,
+        )
+        .unwrap();
+
+        let report = std::fs::read_to_string(dir.path().join("backtest_report.txt")).unwrap();
+        assert!(
+            report.contains("可用现金：    1,100.00"),
+            "可用现金必须是现金台账（1,100.00），不是期末权益的副本: {report}"
+        );
+        assert!(
+            !report.contains("可用现金：    1,150.00"),
+            "可用现金不得再等于期末权益: {report}"
+        );
+        assert!(
+            report.contains("期末持仓：    1 笔（多 0.500000）"),
+            "在途多头必须见数: {report}"
+        );
+        // 「期末持仓」专段必须与摘要同源流水：有在途多头时列出，不得宣称「无持仓」
+        // （7ae0464 改了摘要/现金/保证金三处占位，专段是漏网的第四处——CU 实跑抓出）
+        assert!(
+            report.contains("  BTCUSDT  多 0.500000"),
+            "期末持仓专段应列出在途多头: {report}"
+        );
+        assert!(
+            !report.contains("无持仓"),
+            "有持仓时专段不得宣称无持仓: {report}"
+        );
+        assert!(
+            report.contains("未实现盈亏：  +50.00"),
+            "权益−现金 = 浮动盈亏: {report}"
+        );
+
+        let raw = std::fs::read_to_string(dir.path().join("backtest_result.json")).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(json["accounts"][0]["position_count"].as_u64(), Some(1));
+        assert_eq!(json["accounts"][0]["cash"], 1100.0);
+        assert_eq!(json["accounts"][0]["total_equity"], 1150.0);
+    }
+
+    /// 空仓收尾（常见路径）：数字必须与改动前一致——现金=权益、0 笔、盈亏 0.00。
+    #[test]
+    fn flat_close_still_reports_cash_equal_equity() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = ReportGenerator::new(dir.path());
+        let eq = vec![
+            day_cash("2026-01-01", 1000.0, 1000.0),
+            day_cash("2026-01-02", 1100.0, 1100.0),
+        ];
+        let trades = vec![
+            row("BUY", 0.5, 1000.0, 0.0),
+            row("SELL_CLOSE", 0.5, 1200.0, 100.0),
+        ];
+        g.generate(
+            "st",
+            "BTCUSDT",
+            "2026-01-01",
+            "2026-01-02",
+            1000.0,
+            Path::new("."),
+            "binance/crypto_perpetual/BTCUSDT",
+            "2h",
+            &eq,
+            &[],
+            &trades,
+            10,
+            t(2026, 1, 1),
+            t(2026, 1, 2),
+            None,
+        )
+        .unwrap();
+        let report = std::fs::read_to_string(dir.path().join("backtest_report.txt")).unwrap();
+        assert!(report.contains("可用现金：    1,100.00"), "{report}");
+        assert!(report.contains("期末持仓：    0 笔（空仓）"), "{report}");
+        assert!(
+            report.contains("  无持仓"),
+            "空仓收尾时专段应报无持仓: {report}"
+        );
+        assert!(report.contains("未实现盈亏：  +0.00"), "{report}");
+        let json: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(dir.path().join("backtest_result.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(json["accounts"][0]["position_count"].as_u64(), Some(0));
+    }
+
+    /// 在途空头收尾：专段与摘要同样必须列「空」量（占位修复的对称分支）。
+    #[test]
+    fn open_short_at_end_lists_short_in_dedicated_section() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = ReportGenerator::new(dir.path());
+        let eq = vec![
+            day_cash("2026-01-01", 1000.0, 1000.0),
+            day_cash("2026-01-02", 1300.0, 1050.0),
+        ];
+        let trades = vec![
+            row("SELL", 0.7, 1000.0, 0.0),
+            row("BUY_CLOSE", 0.2, 990.0, 100.0), // 平空 0.2，余 0.5 在途
+        ];
+        g.generate(
+            "st",
+            "BTCUSDT",
+            "2026-01-01",
+            "2026-01-02",
+            1000.0,
+            Path::new("."),
+            "binance/crypto_perpetual/BTCUSDT",
+            "2h",
+            &eq,
+            &[],
+            &trades,
+            10,
+            t(2026, 1, 1),
+            t(2026, 1, 2),
+            None,
+        )
+        .unwrap();
+        let report = std::fs::read_to_string(dir.path().join("backtest_report.txt")).unwrap();
+        assert!(
+            report.contains("期末持仓：    1 笔（空 0.500000）"),
+            "摘要段应见在途空头: {report}"
+        );
+        assert!(
+            report.contains("  BTCUSDT  空 0.500000"),
+            "期末持仓专段应列出在途空头: {report}"
+        );
+        assert!(
+            !report.contains("无持仓"),
+            "有持仓时专段不得宣称无持仓: {report}"
+        );
+    }
+
+    /// 谷值早于峰值时，"全局峰谷差"必须标成权益振幅，不能顶"最大回撤"的名
+    /// （BTCUSDT 实跑：振幅 35.17% vs 真回撤 7.43%，风险被夸大约 4.7 倍）。
+    #[test]
+    fn analysis_report_separates_drawdown_from_amplitude() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = ReportGenerator::new(dir.path());
+        // 100 → 70 → 200：滚动最大回撤 (100-70)/100 = 30%；全局振幅 (200-70)/200 = 65%
+        // 取 30% 而非 40% 是为避开 20/40 分档边界：振幅会把判据推到"风险较高"，
+        // 真回撤只应到"风险中等"——这一档差正是本案的断言点。
+        let eq = vec![
+            day_cash("2026-01-01", 100.0, 100.0),
+            day_cash("2026-01-02", 70.0, 70.0),
+            day_cash("2026-01-03", 200.0, 200.0),
+        ];
+        g.generate(
+            "st",
+            "BTCUSDT",
+            "2026-01-01",
+            "2026-01-03",
+            100.0,
+            Path::new("."),
+            "binance/crypto_perpetual/BTCUSDT",
+            "2h",
+            &eq,
+            &[],
+            &[],
+            10,
+            t(2026, 1, 1),
+            t(2026, 1, 3),
+            None,
+        )
+        .unwrap();
+        let md = std::fs::read_to_string(dir.path().join("backtest_analysis_report.md")).unwrap();
+        assert!(
+            md.contains("| 最大回撤（滚动峰谷） | 30.00% |"),
+            "最大回撤须用滚动口径: {md}"
+        );
+        assert!(
+            md.contains("| 权益振幅（全局峰谷差，非回撤） | 65.00% |"),
+            "全局峰谷差须另列并标明非回撤: {md}"
+        );
+        assert!(
+            md.contains(
+                "谷值（2026-01-02）早于峰值（2026-01-03）：权益振幅 65.00% 大于最大回撤 30.00%"
+            ),
+            "两口径背离时须点名日期与数值: {md}"
+        );
+        assert!(
+            md.contains("最大回撤 30.00%，风险中等"),
+            "风险判据须取真回撤（30% ⇒ 风险中等），而非 65% 的振幅: {md}"
+        );
+        assert!(
+            md.contains("总收益率（期末权益 ÷ 初始资金 − 1） | 100.00%"),
+            "收益率须标明基准: {md}"
+        );
     }
 }
