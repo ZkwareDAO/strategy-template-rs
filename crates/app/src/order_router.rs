@@ -1,6 +1,7 @@
 //! OrderRouter —— T7 order_forwarder 的路由表（按策略类型隔离）
 //!
-//! 信号提交成功（ack）后，RuntimeActor 把 (order_id, 自身句柄) 注册进来；
+//! 信号提交成功（ack）后，live actor（`spi_live_actor`）把 (order_id, 自身句柄)
+//! 注册进来；
 //! order_update 优先精确投递；查无路由时按帧内 strategy_name 仅广播给同策略
 //! 类型的 Actor（无身份才全量兜底）。重连事件只通知同策略类型的 Actor 对账。
 //! HashMap 仅 T7 单 task 读写，无锁。
@@ -10,7 +11,7 @@ use std::collections::HashMap;
 use strategy_broker::OrderUpdate;
 use tracing::{debug, warn};
 
-use crate::runtime_actor::RuntimeHandle;
+use crate::runtime_types::RuntimeHandle;
 
 pub struct OrderRouter {
     /// order_id → 精确接收方（ack 后注册）
@@ -57,7 +58,7 @@ impl OrderRouter {
         }
     }
 
-    /// 某策略类型的交易 WS（重）连：只通知该类型的 **live** RuntimeActor 对账。
+    /// 某策略类型的交易 WS（重）连：只通知该类型的 **live** actor 对账。
     /// paper 实例不走交易 WS，重连与它无关，不得被波及（否则触发无意义对账）。
     pub async fn dispatch_reconnect(&self, strategy_name: &str) {
         debug!(
@@ -88,6 +89,7 @@ impl OrderRouter {
                 u.signal_id.clone(),
                 u.message.clone(),
                 u.place.clone(),
+                u.fee,
                 chrono::Utc::now(),
             )
             .await
@@ -103,7 +105,7 @@ mod tests {
     use strategy_core::order::OrderState;
     use tokio::sync::mpsc;
 
-    use crate::runtime_actor::{RuntimeCommand, RuntimeHandle};
+    use crate::runtime_types::{RuntimeCommand, RuntimeHandle};
 
     fn pair() -> (RuntimeHandle, mpsc::Receiver<RuntimeCommand>) {
         let (tx, rx) = mpsc::channel(8);
@@ -122,6 +124,7 @@ mod tests {
             signal_id: None,
             message: None,
             place: None,
+            fee: None,
         }
     }
 
