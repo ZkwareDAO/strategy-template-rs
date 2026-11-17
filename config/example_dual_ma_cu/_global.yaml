@@ -1,0 +1,10 @@
+# example_dual_ma_cu 组基线（期货：CTP 时段 + 100 万初始权益）
+mode: paper_trading
+warmup_days: 30
+cash: 1000.0
+initial_cash: 1000000.0
+
+services:
+  trading:
+    exchange: SHFE
+    account: example_account
