@@ -120,6 +120,7 @@ async fn main() {
         stop_order_id: None,
         created_event_time: chrono::Utc::now(),
         status: SignalStatus::Created,
+        offset: None,
     };
 
     println!(
