@@ -29,14 +29,6 @@ impl Side {
             Side::Sell => 2,
         }
     }
-
-    pub fn from_direction_long(is_long: bool) -> Self {
-        if is_long {
-            Side::Buy
-        } else {
-            Side::Sell
-        }
-    }
 }
 
 /// 订单类型：1=限价 2=市价

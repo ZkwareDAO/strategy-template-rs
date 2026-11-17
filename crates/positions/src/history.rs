@@ -6,7 +6,8 @@
 //!   `{base}/{YYYYMMDD}/history_position.csv`，启动跨日去重恢复；
 //! - 对外报表契约：[`HistoryPositionLogger`] 仍在平仓时把同一行追加写到
 //!   `history_positions/{strategy_name}/{YYYYMMDD}.csv`（22 列固定列序，下游
-//!   Python/report 按列名消费；见 docs/design.md 对外报表清单）。
+//!   Python/report 按列名消费；报表清单原文见 docs/design.md（该文档已于 2026-11-09
+//!   登记为历史文档，报表面现状以本模块与 `app/src/report.rs` 为准）。
 //!
 //! 与 Python 的差异（有意）：分文件日期取**平仓 K 线时间的 UTC 日期**，
 //! 不取 now() —— 回测重放时文件归属可复现（K线时间红线）。

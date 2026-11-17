@@ -8,6 +8,7 @@
 //! - [`order`]：订单 7 态状态机 + 部分成交累积（§5.3）
 //! - [`fill`]：完全成交通知 FillEvent
 //! - [`position_math`]：加仓均价 / 减仓已实现盈亏纯函数（§5.5）
+//! - [`contract`]：国内期货合约参数（乘数/保证金/手续费）
 //! - [`strategy`]：Strategy trait 与 Ctx
 //! - [`risk`]：统一风控兜底规则
 //!
@@ -15,6 +16,7 @@
 //! [`Strategy::on_candle`] → [`Action`] → [`SignalIntent`]。
 
 pub mod candle;
+pub mod contract;
 pub mod error;
 pub mod fill;
 pub mod lifecycle;
@@ -25,13 +27,10 @@ pub mod signal;
 pub mod strategy;
 
 pub use candle::{Candle, Timeframe};
+pub use contract::{CommissionSpec, ContractSpec, FeeKind, FeeMode};
 pub use error::{Error, Result};
 pub use fill::FillEvent;
 pub use lifecycle::SignalStatus;
 pub use order::{OrderProgress, OrderState};
 pub use position_math::{realized_pnl, weighted_avg};
-pub use signal::{
-    generate_signal_id, intents_from_action, Action, IntentCtx, IntentKind, Side, Signal,
-    SignalIntent, SignalType,
-};
-pub use strategy::{Ctx, Strategy};
+pub use signal::{generate_signal_id, IntentKind, Side, Signal, SignalIntent, SignalType};
