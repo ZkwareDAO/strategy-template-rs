@@ -2,8 +2,8 @@
 //!
 //! - backtest：1m CSV 回放 → 共用引擎 → backtest_output/{run_id}/（过程产物
 //!   进统一 Store 当日快照 state/{day}/{model}.csv，报告产物 result.json/txt/PNG）
-//! - run：实盘/paper（Phase 7 接线 kline-service / trading-service 后启用；
-//!   当前为 fail-fast，直连交易所代码已移除）
+//! - run：实盘/paper（trading-service 单连接：订单回报与 K 线订阅共用；
+//!   直连交易所代码已移除，klines-service 已退役）
 //! - download：币安公共归档离线导入 1m CSV（数据工具，不在交易链路）
 //!
 //! 策略选择（模板冻结，本文件不再因新增策略而修改）：
@@ -16,13 +16,10 @@ use std::time::Duration;
 
 use clap::{Parser, Subcommand};
 
-use strategy_app::config::{self, SymbolSpec};
-use strategy_app::engine::{Engine, EngineConfig};
+use strategy_app::spi_backtest;
+
 use strategy_app::report::ReportGenerator;
-use strategy_broker::backtest::{BacktestBroker, BacktestConfig};
-use strategy_broker::{BacktestOrderClient, Broker};
-use strategy_core::candle::{Candle, Timeframe};
-use strategy_core::strategy::Strategy;
+use strategy_core::candle::Timeframe;
 use strategy_data::csv_store;
 
 #[derive(Parser)]
@@ -62,12 +59,18 @@ enum Commands {
         /// 输出目录
         #[arg(long, default_value = "./backtest_output")]
         output_dir: PathBuf,
-        /// 初始现金（每单名义金额）
+        /// 每单名义金额（crypto/兼容模式；国内期货按合约保证金率决定手数）
         #[arg(long)]
         cash: Option<f64>,
+        /// 回测账户初始权益（缺省 5000；国内期货建议显式配置，如 1000000）
+        #[arg(long)]
+        initial_cash: Option<f64>,
         /// 杠杆
         #[arg(long)]
         leverage: Option<u32>,
+        /// 单边手续费率（仅 crypto/兼容模式；期货手续费读 config/contracts.yaml）
+        #[arg(long)]
+        fee_rate: Option<f64>,
     },
     /// 实盘/paper 运行策略
     Run {
@@ -116,7 +119,7 @@ enum Commands {
         /// 结束日期 YYYYMMDD（不含；缺省为现在）
         #[arg(long)]
         end: Option<String>,
-        /// K 线 CSV 根目录（写 {data_dir}/{interval}/{SYMBOL}_{interval}.csv）
+        /// K 线 CSV 根目录（写 {data_dir}/{interval}/binance/crypto_perpetual/{SYMBOL}_{interval}.csv）
         #[arg(long, default_value = "./data/klines")]
         data_dir: PathBuf,
     },
@@ -143,78 +146,144 @@ fn parse_date(s: &str) -> anyhow::Result<chrono::DateTime<chrono::Utc>> {
     Ok(chrono::Utc.from_utc_datetime(&d.and_hms_opt(0, 0, 0).unwrap()))
 }
 
-/// 策略工厂：注册表查询（按 strategy_type 名实例化，私有参数由策略自行解析）
-fn make_strategy(spec: &SymbolSpec) -> anyhow::Result<Box<dyn Strategy + Send>> {
-    let args = strategy_strategies::registry::FactoryArgs {
-        symbol: &spec.symbol,
-        timeframe: &spec.timeframe,
-        cash: spec.cash,
-        params: spec.params.as_ref(),
-    };
-    strategy_strategies::registry::create(&spec.strategy, &args)
-}
-
-fn runtime_name(strategy: &str, timeframe: &str, symbol: &str, mode: &str) -> String {
-    // 命名约定 {prefix}_{TF}_{v}_{SYMBOL}_{MODE}
-    format!(
-        "{}_{}_3_{}_{}",
-        strategy,
-        timeframe.to_uppercase(),
-        symbol.to_uppercase(),
-        mode.to_uppercase()
-    )
-}
-
 /// 回测起始/结束日期 → "YYYY-MM-DD"（result.json config 的 start_date/end_date）
 fn format_start(t: chrono::DateTime<chrono::Utc>) -> String {
     t.format("%Y-%m-%d").to_string()
 }
 
-/// 读取回测生效的配置文本（复制进报告目录 config.yaml；找不到 → None）
-fn read_config_yaml(config_path: Option<&std::path::Path>) -> anyhow::Result<Option<String>> {
-    let candidates: Vec<PathBuf> = match config_path {
-        Some(p) => vec![p.to_path_buf()],
-        None => config::DEFAULT_CONFIG_PATHS
-            .iter()
-            .map(PathBuf::from)
-            .chain(std::iter::once(PathBuf::from(config::DEFAULT_CONFIG_DIR)))
-            .collect(),
-    };
-    for p in candidates {
-        if p.is_file() {
-            return Ok(Some(std::fs::read_to_string(&p)?));
-        }
-        if p.is_dir() {
-            // 目录形式（config/{strategy}/{SYMBOL}.yaml）：合并所有 YAML
-            let mut files: Vec<PathBuf> = Vec::new();
-            collect_yaml(&p, &mut files)?;
-            files.sort();
-            if files.is_empty() {
-                continue;
-            }
-            let mut merged = String::new();
-            for f in &files {
-                if !merged.is_empty() {
-                    merged.push_str("\n---\n");
-                }
-                merged.push_str(&std::fs::read_to_string(f)?);
-            }
-            return Ok(Some(merged));
-        }
-    }
-    Ok(None)
+/// 横截面回测 CLI 参数包（避免 9 参函数）。
+struct StrategyBacktestCli {
+    config_path: std::path::PathBuf,
+    start: String,
+    end: String,
+    warmup_start: Option<String>,
+    data_dir: PathBuf,
+    output_dir: PathBuf,
+    initial_cash: Option<f64>,
+    fee_rate: Option<f64>,
 }
 
-fn collect_yaml(dir: &std::path::Path, out: &mut Vec<PathBuf>) -> anyhow::Result<()> {
-    for e in std::fs::read_dir(dir)? {
-        let e = e?;
-        let p = e.path();
-        if p.is_dir() {
-            collect_yaml(&p, out)?;
-        } else if matches!(p.extension().and_then(|e| e.to_str()), Some("yaml" | "yml")) {
-            out.push(p);
-        }
+/// 横截面回测 CLI 装配（PR-4）：strategy.yaml → 每标的 1m CSV → RunnerGroup
+/// 统一主循环 → 组合净值/成交报告。`--strategy/--symbol/--cash` 已在入口拒绝。
+fn run_strategy_backtest(cli: StrategyBacktestCli) -> anyhow::Result<()> {
+    use strategy_app::strategy_config;
+
+    let StrategyBacktestCli {
+        config_path,
+        start,
+        end,
+        warmup_start,
+        data_dir,
+        output_dir,
+        initial_cash,
+        fee_rate,
+    } = cli;
+    let spec = strategy_config::load_strategy(&config_path)?;
+    let start_ts = parse_date(&start)?;
+    let end_ts = parse_date(&end)?;
+    anyhow::ensure!(end_ts > start_ts, "end 必须晚于 start");
+    let warmup_ts = match warmup_start {
+        Some(w) => parse_date(&w)?,
+        None => start_ts - chrono::Duration::days(spec.warmup_days as i64),
+    };
+    let mut warmup: Vec<Vec<strategy_core::candle::Candle>> = Vec::new();
+    let mut trading: Vec<Vec<strategy_core::candle::Candle>> = Vec::new();
+    for ispec in &spec.instruments {
+        let all = spi_backtest::csv_1m_candles(
+            &data_dir,
+            &ispec.venue_key,
+            Some(warmup_ts),
+            Some(end_ts),
+        );
+        anyhow::ensure!(
+            all.iter().any(|c| c.open_time >= start_ts),
+            "回测区间无 1m 数据：行键 `{}`（区间 {start}..{end}）；先 download 或修正 universe",
+            ispec.venue_key
+        );
+        warmup.push(
+            all.iter()
+                .filter(|c| c.open_time < start_ts)
+                .copied()
+                .collect(),
+        );
+        trading.push(
+            all.into_iter()
+                .filter(|c| c.open_time >= start_ts)
+                .collect(),
+        );
     }
+    // 与 live 装配同口径：初始总额 = Σ 各标的 initial_cash（未配置按 5000）。
+    // 配置加载已把 _global.initial_cash 按标的等分，取首标的会只剩 1/N。
+    let initial_cash = initial_cash.unwrap_or_else(|| {
+        spec.instruments
+            .iter()
+            .map(|s| s.initial_cash.unwrap_or(5000.0))
+            .sum()
+    });
+    let strategy = strategy_config::build_strategy(&spec)?;
+
+    let run_id = format!(
+        "{}_{}_{start}_{end}",
+        spec.strategy_type,
+        spec.strategy_id.replace(':', "_")
+    );
+    let now_local = chrono::Local::now();
+    let run_dir = output_dir
+        .join(&spec.strategy_type)
+        .join(now_local.format("%Y%m%d").to_string())
+        .join(now_local.format("%H%M%S").to_string())
+        .join(spec.strategy_id.replace(':', "_"));
+    let out_base = run_dir.join("engine");
+    if out_base.exists() {
+        std::fs::remove_dir_all(&out_base)?;
+    }
+    let config_yaml = std::fs::read_to_string(&config_path).ok();
+
+    let bt_start = chrono::Utc::now();
+    let run = spi_backtest::run_strategy_from_spec(spi_backtest::StrategyRunArgs {
+        spec: &spec,
+        strategy,
+        warmup: &warmup,
+        trading: &trading,
+        initial_cash,
+        fee_rate,
+        state_dir: &out_base.join("state"),
+        data_dir: &data_dir,
+    })?;
+    let base_tf = spec
+        .config
+        .timeframes
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "15m".into());
+    let reporter = ReportGenerator::new(&run_dir);
+    reporter.generate(
+        &spec.strategy_id,
+        &spec.strategy_id,
+        &format_start(start_ts),
+        &format_start(end_ts),
+        run.initial_cash,
+        &data_dir,
+        "strategy",
+        &base_tf,
+        &run.daily,
+        &run.tf_points,
+        &run.trade_rows,
+        run.summary.bars_processed as usize,
+        bt_start,
+        chrono::Utc::now(),
+        config_yaml.as_deref(),
+    )?;
+    println!("横截面回测完成: {run_id}");
+    println!(
+        "bars={} fills={} nav_final={:.4} rebalance_epoch={}",
+        run.summary.bars_processed,
+        run.summary.fills.len(),
+        run.summary.final_portfolio.nav,
+        run.summary.final_portfolio.rebalance_epoch,
+    );
+    println!("输出目录: {out_base:?}");
+    println!("报告目录: {run_dir:?}");
     Ok(())
 }
 
@@ -235,160 +304,46 @@ fn main() -> anyhow::Result<()> {
             config: config_path,
             strategy,
             symbol,
-            timeframe,
+            timeframe: _timeframe,
             warmup_start,
             start,
             end,
             data_dir,
             output_dir,
             cash,
-            leverage,
+            initial_cash,
+            leverage: _leverage,
+            fee_rate,
         } => {
-            let file_cfg = config::load(config_path.as_deref())?;
-            let spec = config::resolve_backtest(
-                &file_cfg,
-                symbol.as_deref(),
-                strategy.as_deref(),
-                timeframe.as_deref(),
-                cash,
-            )?;
-            let leverage = leverage
-                .or(file_cfg.leverage)
-                .unwrap_or(config::Defaults::LEVERAGE);
-
-            let start_ts = parse_date(&start)?;
-            let end_ts = parse_date(&end)?;
-            anyhow::ensure!(end_ts > start_ts, "end 必须晚于 start");
-
-            // warmup 起点：start 前 30 天（镜像 Python sync_history_days=30）
-            let warmup_ts = match warmup_start {
-                Some(w) => parse_date(&w)?,
-                None => start_ts - chrono::Duration::days(30),
-            };
-
-            // 读取 1m CSV（[warmup, end)）
-            let all = csv_store::load_or_empty(&data_dir, &spec.symbol, Timeframe::M1)?;
-            let replay: Vec<Candle> = all
-                .into_iter()
-                .filter(|c| c.open_time >= warmup_ts && c.open_time < end_ts)
-                .collect();
-            let warmup: Vec<Candle> = replay
-                .iter()
-                .filter(|c| c.open_time < start_ts)
-                .copied()
-                .collect();
-            let trading: Vec<Candle> = replay
-                .iter()
-                .filter(|c| c.open_time >= start_ts)
-                .copied()
-                .collect();
-            anyhow::ensure!(!trading.is_empty(), "回测区间无 1m 数据: {data_dir:?}");
-
-            let run_id = format!("{}_{}_{start}_{end}", spec.strategy, spec.symbol);
-            let name = runtime_name(&spec.strategy, &spec.timeframe, &spec.symbol, "backtest");
-
-            // Python 格式报告目录（{strategy}/{YYYYMMDD}/{HHMMSS}/{SYMBOL}/）。
-            // 时间戳取回测区间 end（对齐 Python use_today_as_output_date=false 语义，
-            // 同参数重跑落同一目录，可复现 diff）
-            let bt_start_time = chrono::Utc::now();
-            let end_yyyymmdd = end_ts.format("%Y%m%d").to_string();
-            let run_stamp = format!(
-                "{}T{}",
-                end_ts.format("%Y%m%d"),
-                bt_start_time.format("%H%M%S")
+            // ── 横截面配置分流（显式 --config 指向 strategy.yaml/目录时；旧路径零改动）──
+            if let Some(p) = config_path.as_deref() {
+                if strategy_app::strategy_config::is_strategy_config_path(p) {
+                    if strategy.is_some() || symbol.is_some() || cash.is_some() {
+                        anyhow::bail!(
+                            "横截面配置（strategy.yaml）不支持 --strategy/--symbol/--cash 覆盖项：\
+                             请写进 strategy.yaml 的 universe/sizing 段（设计 §5.1）"
+                        );
+                    }
+                    return run_strategy_backtest(StrategyBacktestCli {
+                        config_path: p.to_path_buf(),
+                        start,
+                        end,
+                        warmup_start,
+                        data_dir,
+                        output_dir,
+                        initial_cash,
+                        fee_rate,
+                    });
+                }
+                if strategy_app::strategy_config::is_strategy_set_dir(p) {
+                    anyhow::bail!(
+                        "横截面配置集（多组）仅支持 run：backtest 请逐组用 --config <组目录>/strategy.yaml"
+                    );
+                }
+            }
+            anyhow::bail!(
+                "backtest 仅支持 strategy.yaml / 配置集：旧 per-symbol 入口已退役；请用 --config <组>/strategy.yaml"
             );
-            let run_dir = output_dir
-                .join(&spec.strategy)
-                .join(&end_yyyymmdd)
-                .join(&run_stamp)
-                .join(&spec.symbol);
-
-            // out_base = {run_dir}/engine/：过程产物（signal.csv / exchange_orders.csv /
-            // state/）与结果报告（equity/report/charts）分层；纯生成物清空重建，
-            // 保证重跑同参数 = 全新回测（signal.csv 追加写是实盘语义，
-            // 回测残留旧行会破坏确定性 diff 验收）。
-            let out_base = run_dir.join("engine");
-            if out_base.exists() {
-                std::fs::remove_dir_all(&out_base)?;
-            }
-
-            let cfg = EngineConfig {
-                strategy_name: name.clone(),
-                strategy_type: spec.strategy.clone(),
-                symbol: spec.symbol.clone(),
-                trading_mode: "backtest".into(),
-                user_id: 1,
-                leverage,
-                cash: spec.cash,
-                exchange: "binance".into(),
-                max_closed_len: 2000,
-                risk: file_cfg.risk.clone().unwrap_or_default(),
-                signal_tf: spec.timeframe.clone(),
-            };
-            let strat = make_strategy(&spec)?;
-            // 回测恒用本地撮合（确定性），经 OrderGateway 端口进信号管道。
-            // 全仓语义：notional_per_order = 0 → 每次开仓用全部可用现金×杠杆。
-            let broker_cfg = BacktestConfig {
-                leverage,
-                notional_per_order: 0.0,
-                exchange: "binance".into(),
-                ..Default::default()
-            };
-            let backtest = BacktestBroker::new(broker_cfg, &name, &out_base);
-            // 报告初始资金 = 撮合内核实际起始现金（BacktestConfig.cash），
-            // 不是 spec.cash（那是每单名义金额）——口径不一致会让收益率失真
-            let initial_cash = backtest.account().map(|a| a.cash).unwrap_or(spec.cash);
-            let client = BacktestOrderClient::new(backtest);
-            let mut engine = Engine::new(cfg, strat, client, out_base.join("state"), &out_base);
-            // 回测每次从零开始：不从 Store 恢复持仓/冷却日（那是实盘崩溃恢复语义），
-            // 否则重跑同目录会带着上一轮的残留仓位，整段回测"持仓中"不开新仓。
-            engine.preload(&warmup);
-
-            for c in &trading {
-                engine.on_closed_1m(*c)?;
-                engine.on_equity_mark(c);
-            }
-            // 回测结束统一落信号当前态快照（K 线时钟，确定性；非 live 阻塞池纪律）
-            if let Err(e) = engine.flush_state() {
-                tracing::warn!("回测结束信号状态 flush 失败: {e}");
-            }
-
-            let stats = engine.stats();
-
-            // 回测主循环已喂 on_equity_mark；generator 只负责写文件
-            let reporter = ReportGenerator::new(&run_dir);
-            let config_yaml = read_config_yaml(config_path.as_deref())?;
-            reporter
-                .generate(
-                    &spec.strategy,
-                    &spec.symbol,
-                    &format_start(start_ts),
-                    &format_start(end_ts),
-                    initial_cash,
-                    &data_dir,
-                    &spec.timeframe,
-                    &engine.daily_equity(),
-                    &engine.tf_equity(),
-                    &engine.trade_rows(),
-                    stats.bars,
-                    bt_start_time,
-                    chrono::Utc::now(),
-                    config_yaml.as_deref(),
-                )
-                .map_err(|e| anyhow::anyhow!("报告生成失败: {e}"))?;
-
-            println!("回测完成: {run_id}");
-            println!(
-                "bars={} signals={} orders={} opened={} closed={}",
-                stats.bars,
-                stats.signals_written,
-                stats.orders_written,
-                stats.positions_opened,
-                stats.positions_closed
-            );
-            println!("输出目录: {out_base:?}");
-            println!("报告目录: {run_dir:?}");
-            Ok(())
         }
         Commands::Download {
             symbols,
@@ -411,12 +366,15 @@ fn main() -> anyhow::Result<()> {
             };
             for symbol in &symbols {
                 let symbol = symbol.to_uppercase();
+                // 数据源现仅 Binance 公共归档：命名空间键按
+                // binance/crypto_perpetual 派生（§6.1；多交易所下载随 live 面演进）
+                let venue_key = strategy_app::spi_backtest::venue_key_for("binance", None, &symbol);
                 let start_ts = match start_opt {
                     Some(s) => s,
                     None => {
                         // 增量语义：现有 CSV 末根为起点（末根本身重拉，残缺值可被覆盖）；
-                        // 无 CSV 时按 --days 全量
-                        let path = csv_store::csv_path(&data_dir, &symbol, tf);
+                        // 无 CSV 时按 --days 全量。resolve 兼容旧布局（一次迁移）
+                        let path = csv_store::resolve_csv_path(&data_dir, &venue_key, tf);
                         let existing = csv_store::load_csv(&path)?;
                         match existing.last() {
                             Some(last) => {
@@ -438,11 +396,12 @@ fn main() -> anyhow::Result<()> {
                 }
                 let dl = strategy_data::archive_download::Downloader::new();
                 let rt = tokio::runtime::Runtime::new()?;
-                let total =
-                    rt.block_on(dl.download_range(&symbol, tf, start_ts, end_ts, &data_dir))?;
+                let total = rt.block_on(
+                    dl.download_range(&symbol, &venue_key, tf, start_ts, end_ts, &data_dir),
+                )?;
                 println!(
                     "{symbol} {interval}: 共 {total} 根 → {}",
-                    csv_store::csv_path(&data_dir, &symbol, tf).display()
+                    csv_store::csv_path(&data_dir, &venue_key, tf).display()
                 );
             }
             Ok(())
@@ -467,16 +426,10 @@ fn main() -> anyhow::Result<()> {
             anyhow::ensure!(!paths.is_empty(), "无 CSV 文件: {:?}", path);
             for p in &paths {
                 let rows = strategy_app::inspect::read_csv(p)?;
-                let name = p
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("csv");
+                let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("csv");
                 if let Some(dir) = &out {
                     std::fs::create_dir_all(dir)?;
-                    let stem = p
-                        .file_stem()
-                        .and_then(|s| s.to_str())
-                        .unwrap_or("out");
+                    let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or("out");
                     let out_path = dir.join(format!("{stem}.flat.csv"));
                     strategy_app::inspect::write_flat_csv(&out_path, &rows)?;
                     println!("已写出: {}", out_path.display());
@@ -500,32 +453,79 @@ fn main() -> anyhow::Result<()> {
             leverage: _,
             data_dir,
         } => {
-            let file_cfg = config::load(config_path.as_deref())?;
-            let specs = config::resolve_run(
-                &file_cfg,
-                &symbols,
-                strategy.as_deref(),
-                timeframe.as_deref(),
-                cash,
-                mode.as_deref(),
-            )?;
-            // mode 合法性已在 resolve_run 逐 spec 校验；网关按 spec.mode 分流
-            let services = file_cfg.services.clone().ok_or_else(|| {
-                anyhow::anyhow!("run 需要配置文件中的 services.kline / services.trading 端点")
-            })?;
-            std::fs::create_dir_all(&output_dir)?;
-            let rt = tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .build()?;
-            rt.block_on(strategy_app::bootstrap::run_live(
-                specs,
-                services,
-                output_dir,
-                data_dir,
-                Duration::from_secs(file_cfg.state_flush_interval_secs),
-                file_cfg.state_prune_terminal,
-            ))?;
-            Ok(())
+            // 横截面 run（PR-5 T6）：新 schema 走独立 loader/actor，在旧 loader 之前分流。
+            if let Some(p) = config_path.as_deref() {
+                if strategy_app::strategy_config::is_strategy_config_path(p)
+                    || strategy_app::strategy_config::is_strategy_set_dir(p)
+                {
+                    // 单标的覆盖参数不支持（universe 由 strategy.yaml 决定；文案与
+                    // backtest 分支同款）。
+                    if !symbols.is_empty()
+                        || strategy.is_some()
+                        || timeframe.is_some()
+                        || cash.is_some()
+                    {
+                        anyhow::bail!(
+                            "横截面 run 不支持 --strategy/--symbol/--timeframe/--cash 覆盖（universe 由 strategy.yaml 决定）：{}",
+                            p.display()
+                        );
+                    }
+                    let specs = strategy_app::strategy_config::load_strategy_set(p)?;
+                    let modes: Vec<String> = specs
+                        .iter()
+                        .map(|s| {
+                            strategy_app::strategy_config::resolve_run_mode(mode.as_deref(), s)
+                        })
+                        .collect::<anyhow::Result<_>>()?;
+                    let run_mode = modes[0].clone();
+                    anyhow::ensure!(
+                        modes.iter().all(|m| m == &run_mode),
+                        "横截面配置集各组 mode 解析结果不一致：{}（各组文件 mode/_global 基线须一致；也可用 --mode 统一覆盖）",
+                        modes.join(",")
+                    );
+                    strategy_app::strategy_config::validate_strategy_set(&specs, &run_mode)?;
+                    let services = specs[0].services.clone().ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "横截面 run 需要 _global.yaml 的 services.trading 端点（K 线与交易共用同一连接；klines-service 已退役）"
+                        )
+                    })?;
+                    strategy_app::config::check_kline_retired(&services)?;
+                    // 占位端点守卫（与单标的 run 同口径）：live 拒启，paper 出声。
+                    if services.trading.is_unconfigured() {
+                        if run_mode == "live" {
+                            anyhow::bail!(
+                                "横截面 run 拒绝启动：mode=live，但 services.trading.ws_url 仍是占位值「{}」。\n\
+                                 请配置真实 trading-service 端点；若本次只想停单观察，请配真实端点并显式置\n\
+                                 services.trading.submit_enabled: false（docs/RUNBOOK.md §2.1）",
+                                strategy_app::config::PLACEHOLDER_TRADING_WS_URL
+                            );
+                        }
+                        tracing::warn!(
+                            ws_url = strategy_app::config::PLACEHOLDER_TRADING_WS_URL,
+                            "services.trading 未配置真实端点：横截面运行不会产生任何真实下单（paper 属预期）"
+                        );
+                    }
+                    std::fs::create_dir_all(&output_dir)?;
+                    let flush_secs = specs[0].state_flush_interval_secs;
+                    let prune = specs[0].state_prune_terminal;
+                    let rt = tokio::runtime::Builder::new_multi_thread()
+                        .enable_all()
+                        .build()?;
+                    rt.block_on(strategy_app::bootstrap::run_live_strategy_set(
+                        specs,
+                        services,
+                        output_dir,
+                        data_dir,
+                        run_mode,
+                        Duration::from_secs(flush_secs),
+                        prune,
+                    ))?;
+                    return Ok(());
+                }
+            }
+            anyhow::bail!(
+                "run 仅支持 strategy.yaml / 配置集：旧 per-symbol 入口已退役；请用 --config <组>/strategy.yaml"
+            );
         }
     }
 }
