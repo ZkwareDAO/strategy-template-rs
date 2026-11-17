@@ -192,7 +192,10 @@ fn print_table(rows: &[FlatRow], limit: usize) {
         println!("{}", cells.join("  "));
     }
     if limit > 0 && rows.len() > limit {
-        println!("… 共 {} 行，显示前 {limit} 行（--limit 0 看全部）", rows.len());
+        println!(
+            "… 共 {} 行，显示前 {limit} 行（--limit 0 看全部）",
+            rows.len()
+        );
     }
 }
 
@@ -221,7 +224,10 @@ fn print_vertical(rows: &[FlatRow], limit: usize) {
         println!();
     }
     if limit > 0 && rows.len() > limit {
-        println!("… 共 {} 行，显示前 {limit} 行（--limit 0 看全部）", rows.len());
+        println!(
+            "… 共 {} 行，显示前 {limit} 行（--limit 0 看全部）",
+            rows.len()
+        );
     }
 }
 
@@ -303,11 +309,7 @@ mod tests {
 
     fn snapshot_csv() -> Vec<u8> {
         let mut buf = Vec::new();
-        writeln!(
-            buf,
-            "id,deleted,created_at_ms,updated_at_ms,payload_json"
-        )
-        .unwrap();
+        writeln!(buf, "id,deleted,created_at_ms,updated_at_ms,payload_json").unwrap();
         writeln!(
             buf,
             "sig_1,0,1786953540000,1786953540000,\"{{\"\"kind\"\":\"\"open\"\",\"\"price\"\":100.0,\"\"intent\"\":{{\"\"direction\"\":\"\"long\"\"}}}}\""
@@ -339,7 +341,10 @@ mod tests {
         std::fs::write(&p, "a,b\n1,2\n").unwrap();
         let rows = read_csv(&p).unwrap();
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].fields, vec![("a".into(), "1".into()), ("b".into(), "2".into())]);
+        assert_eq!(
+            rows[0].fields,
+            vec![("a".into(), "1".into()), ("b".into(), "2".into())]
+        );
     }
 
     #[test]
