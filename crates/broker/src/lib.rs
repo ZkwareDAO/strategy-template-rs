@@ -13,21 +13,25 @@
 pub mod auth;
 pub mod backtest;
 pub mod backtest_client;
+pub mod kline;
 pub mod mock;
 pub mod order_log;
 pub mod trading_service;
 pub mod wire;
 
+mod action;
+
 use chrono::{DateTime, Utc};
 
-use strategy_core::signal::Action;
-
+pub use action::Action;
 pub use backtest::{BacktestBroker, BacktestConfig};
 pub use backtest_client::BacktestOrderClient;
-pub use mock::{MockScenario, MockServer};
+pub use kline::{Bar, KlineBook};
+pub use mock::{MockPositionHandle, MockScenario, MockServer};
 pub use order_log::{ExchangeOrderRecord, ExchangeOrderWriter, OrderStatus, PosType, SideCode};
 pub use trading_service::{
-    ClientEvent, OrderUpdate, OrderVenueCfg, TradingConfig, TradingGateway, TradingServiceClient,
+    ClientEvent, KlineHistory, KlineUpdate, OrderUpdate, OrderVenueCfg, TradingConfig,
+    TradingGateway, TradingServiceClient,
 };
 
 /// 账户快照（权益追踪用；mark 价格由调用方按当前 K 线给定）
