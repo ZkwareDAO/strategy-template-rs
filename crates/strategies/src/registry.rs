@@ -8,7 +8,7 @@
 //! build.rs 生成 `strategy_registry_gen.rs`（mod 清单 + `generated_factories()`），
 //! 本文件提供运行时 API，两者在 lib.rs 汇合。
 
-use strategy_core::strategy::Strategy;
+use strategy_engine::strategy::port::CrossSectionalStrategyPort;
 
 /// 工厂参数（CLI/配置文件聚合后的运行时取值）
 #[derive(Debug, Clone)]
@@ -28,7 +28,7 @@ pub struct StrategyEntry {
     pub name: &'static str,
     /// 工厂：参数 → 策略实例
     #[allow(clippy::type_complexity)]
-    pub factory: fn(&FactoryArgs) -> anyhow::Result<Box<dyn Strategy + Send>>,
+    pub factory: fn(&FactoryArgs) -> anyhow::Result<Box<dyn CrossSectionalStrategyPort>>,
 }
 
 /// 策略文件尾部的自注册宏（每个策略文件恰好调用一次）
@@ -56,7 +56,10 @@ macro_rules! register_strategy {
 }
 
 /// 按名字创建策略实例；未知名字时错误信息动态列出可用策略
-pub fn create(name: &str, args: &FactoryArgs) -> anyhow::Result<Box<dyn Strategy + Send>> {
+pub fn create(
+    name: &str,
+    args: &FactoryArgs,
+) -> anyhow::Result<Box<dyn CrossSectionalStrategyPort>> {
     let known = all();
     let entry = known
         .iter()

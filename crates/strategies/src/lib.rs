@@ -8,7 +8,11 @@
 //! 教学 example 见同目录 `example_dual_ma.rs`（入门）与 `example_mtf_trend.rs`（多周期）。
 
 // ─── 模板冻结区 ───────────────────────────────────────────────────────────
-// 以下两行是接线代码，新增策略永远不碰本文件。
+// 所有策略（单标的与横截面一视同仁）都是 `src/*.rs` 顶层文件，
+// 由 build.rs 自动注册；新增策略不改本文件。
+
+/// 策略基类：通用决策骨架 + 策略私有 alpha 钩子。
+pub mod common;
 
 /// 策略注册表（StrategyEntry / register_strategy! / create / available）
 pub mod registry;
