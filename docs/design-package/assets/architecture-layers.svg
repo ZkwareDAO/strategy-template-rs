@@ -1,0 +1,82 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 680 660" width="680" height="660"
+     font-family="Noto Sans SC, Microsoft YaHei, PingFang SC, Segoe UI, sans-serif">
+  <defs>
+    <marker id="arrowhead" markerWidth="10" markerHeight="10" refX="6" refY="5" orient="auto">
+      <polygon points="0,0 10,5 0,10" fill="#3b5f94"/>
+    </marker>
+  </defs>
+
+  <rect x="0" y="0" width="680" height="660" fill="#ffffff"/>
+  <text x="28" y="38" font-size="17" font-weight="700" fill="#1f2937">strategy-template-rs 分层架构（依赖方向：向下）</text>
+
+  <!-- 依赖方向总箭头 -->
+  <line x1="666" y1="64" x2="666" y2="612" stroke="#3b5f94" stroke-width="2.5"
+        stroke-linecap="round" marker-end="url(#arrowhead)"/>
+
+  <!-- ① 外部服务 -->
+  <g>
+    <rect x="24" y="58" width="632" height="104" rx="14" fill="#e8f1fc" stroke="#c3daf4"/>
+    <text x="40" y="82" font-size="12.5" font-weight="700" fill="#2b5ea8">① 外部服务（系统边界外）· kline-service 已并入</text>
+    <rect x="36" y="92" width="632" height="60" rx="10" fill="#d8e7fa" stroke="#8ab4e8" stroke-width="1.5"/>
+    <text x="352" y="116" text-anchor="middle" font-size="14" font-weight="700" fill="#1e4d8c">trading-service（唯一外部服务）</text>
+    <text x="352" y="138" text-anchor="middle" font-size="11" fill="#3c6094">交易接口：WS 下单 / 回报 / 查仓　·　K线接口：订阅 / 回填 / 1m 推送</text>
+  </g>
+
+  <!-- ② 编排层 -->
+  <g>
+    <rect x="24" y="174" width="632" height="104" rx="14" fill="#efeafc" stroke="#d9ccf5"/>
+    <text x="40" y="198" font-size="12.5" font-weight="700" fill="#6b47b8">② 编排层 · crates/app</text>
+    <rect x="30" y="208" width="196" height="60" rx="10" fill="#e3d8f7" stroke="#a98fe0" stroke-width="1.5"/>
+    <text x="128" y="234" text-anchor="middle" font-size="13" font-weight="700" fill="#4c2e94">CLI · bootstrap</text>
+    <text x="128" y="254" text-anchor="middle" font-size="10.5" fill="#6a4fa3">装配 / 监督 / 退出</text>
+    <rect x="242" y="208" width="196" height="60" rx="10" fill="#e3d8f7" stroke="#a98fe0" stroke-width="1.5"/>
+    <text x="340" y="234" text-anchor="middle" font-size="13" font-weight="700" fill="#4c2e94">RuntimeActor ×N + T7</text>
+    <text x="340" y="254" text-anchor="middle" font-size="10.5" fill="#6a4fa3">单写者内核 · 路由</text>
+    <rect x="454" y="208" width="196" height="60" rx="10" fill="#e3d8f7" stroke="#a98fe0" stroke-width="1.5"/>
+    <text x="552" y="234" text-anchor="middle" font-size="13" font-weight="700" fill="#4c2e94">回测引擎 · 报告</text>
+    <text x="552" y="254" text-anchor="middle" font-size="10.5" fill="#6a4fa3">1m 回放 · result/PNG</text>
+  </g>
+
+  <!-- ③ 领域层 -->
+  <g>
+    <rect x="24" y="290" width="632" height="104" rx="14" fill="#e7f5ea" stroke="#c8e6d0"/>
+    <text x="40" y="314" font-size="12.5" font-weight="700" fill="#2f7a45">③ 领域层</text>
+    <rect x="30" y="324" width="196" height="60" rx="10" fill="#d5ecdc" stroke="#7fc08f" stroke-width="1.5"/>
+    <text x="128" y="350" text-anchor="middle" font-size="13" font-weight="700" fill="#245c34">signals</text>
+    <text x="128" y="370" text-anchor="middle" font-size="10.5" fill="#3f7a52">信号 8 态 · 重试 · 对账</text>
+    <rect x="242" y="324" width="196" height="60" rx="10" fill="#d5ecdc" stroke="#7fc08f" stroke-width="1.5"/>
+    <text x="340" y="350" text-anchor="middle" font-size="13" font-weight="700" fill="#245c34">positions</text>
+    <text x="340" y="370" text-anchor="middle" font-size="10.5" fill="#3f7a52">仓位统一 · 止损 · 冷却</text>
+    <rect x="454" y="324" width="196" height="60" rx="10" fill="#d5ecdc" stroke="#7fc08f" stroke-width="1.5"/>
+    <text x="552" y="350" text-anchor="middle" font-size="13" font-weight="700" fill="#245c34">strategies</text>
+    <text x="552" y="370" text-anchor="middle" font-size="10.5" fill="#3f7a52">框架注册 · 回调注入</text>
+  </g>
+
+  <!-- ④ 适配层 -->
+  <g>
+    <rect x="24" y="406" width="632" height="104" rx="14" fill="#fdf6e0" stroke="#f0e2b8"/>
+    <text x="40" y="430" font-size="12.5" font-weight="700" fill="#94741c">④ 适配层（端口 / 适配器）</text>
+    <rect x="30" y="440" width="196" height="60" rx="10" fill="#f7ecc8" stroke="#d9bb63" stroke-width="1.5"/>
+    <text x="128" y="466" text-anchor="middle" font-size="13" font-weight="700" fill="#7a5f14">data</text>
+    <text x="128" y="486" text-anchor="middle" font-size="10.5" fill="#8d742e">KlineClient · Feed 聚合</text>
+    <rect x="242" y="440" width="196" height="60" rx="10" fill="#f7ecc8" stroke="#d9bb63" stroke-width="1.5"/>
+    <text x="340" y="466" text-anchor="middle" font-size="13" font-weight="700" fill="#7a5f14">broker</text>
+    <text x="340" y="486" text-anchor="middle" font-size="10.5" fill="#8d742e">交易网关 · 回测撮合</text>
+    <rect x="454" y="440" width="196" height="60" rx="10" fill="#f7ecc8" stroke="#d9bb63" stroke-width="1.5"/>
+    <text x="552" y="466" text-anchor="middle" font-size="13" font-weight="700" fill="#7a5f14">engine</text>
+    <text x="552" y="486" text-anchor="middle" font-size="10.5" fill="#8d742e">交易所 SPI · strategy 运行时</text>
+  </g>
+
+  <!-- ⑤ 核心层 -->
+  <g>
+    <rect x="24" y="522" width="632" height="104" rx="14" fill="#fceaf0" stroke="#f4d3de"/>
+    <text x="40" y="546" font-size="12.5" font-weight="700" fill="#b04a68">⑤ 核心层（纯逻辑 · 零 IO）</text>
+    <rect x="36" y="556" width="296" height="60" rx="10" fill="#f7d8e2" stroke="#e093aa" stroke-width="1.5"/>
+    <text x="184" y="582" text-anchor="middle" font-size="14" font-weight="700" fill="#94334f">core</text>
+    <text x="184" y="602" text-anchor="middle" font-size="10.5" fill="#a8576e">模型: 信号/订单状态机 · 纯函数</text>
+    <rect x="348" y="556" width="296" height="60" rx="10" fill="#f7d8e2" stroke="#e093aa" stroke-width="1.5"/>
+    <text x="496" y="582" text-anchor="middle" font-size="14" font-weight="700" fill="#94334f">store</text>
+    <text x="496" y="602" text-anchor="middle" font-size="10.5" fill="#a8576e">Store/ModelTable · 日快照 · 双模 recover</text>
+  </g>
+</svg>

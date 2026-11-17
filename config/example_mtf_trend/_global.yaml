@@ -1,0 +1,9 @@
+# example_mtf_trend 组基线
+mode: paper_trading
+warmup_days: 60 # 多周期需更长预热（1d EMA50）
+cash: 200.0
+
+services:
+  trading:
+    exchange: binance
+    account: example_account

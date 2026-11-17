@@ -1,0 +1,87 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 600" width="720" height="600"
+     font-family="Noto Sans SC, Microsoft YaHei, PingFang SC, Segoe UI, sans-serif">
+  <defs>
+    <marker id="arrowhead" markerWidth="10" markerHeight="10" refX="6" refY="5" orient="auto">
+      <polygon points="0,0 10,5 0,10" fill="#3b5f94"/>
+    </marker>
+  </defs>
+
+  <rect x="0" y="0" width="720" height="600" fill="#ffffff"/>
+  <text x="28" y="38" font-size="17" font-weight="700" fill="#1f2937">crate 依赖图（编译期 · 依赖只允许向下）</text>
+
+  <!-- 依赖方向总箭头 -->
+  <line x1="706" y1="64" x2="706" y2="530" stroke="#3b5f94" stroke-width="2.5"
+        stroke-linecap="round" marker-end="url(#arrowhead)"/>
+
+  <!-- ① app -->
+  <g>
+    <rect x="24" y="58" width="656" height="100" rx="14" fill="#efeafc" stroke="#d9ccf5"/>
+    <text x="40" y="82" font-size="12.5" font-weight="700" fill="#6b47b8">① 编排层</text>
+    <rect x="36" y="92" width="632" height="56" rx="10" fill="#e3d8f7" stroke="#a98fe0" stroke-width="1.5"/>
+    <text x="52" y="115" font-size="13" font-weight="700" fill="#4c2e94">app</text>
+    <text x="90" y="115" font-size="10.5" fill="#6a4fa3">CLI · bootstrap · 回测 · 报告 · 路由</text>
+    <text x="52" y="136" font-size="10.5" font-weight="700" fill="#7c5cc4">依赖：signals · positions · broker · data · engine · strategies · store · core</text>
+  </g>
+
+  <!-- ② 领域层 -->
+  <g>
+    <rect x="24" y="174" width="656" height="126" rx="14" fill="#e7f5ea" stroke="#c8e6d0"/>
+    <text x="40" y="198" font-size="12.5" font-weight="700" fill="#2f7a45">② 领域层</text>
+    <rect x="36" y="208" width="196" height="80" rx="10" fill="#d5ecdc" stroke="#7fc08f" stroke-width="1.5"/>
+    <text x="134" y="232" text-anchor="middle" font-size="13" font-weight="700" fill="#245c34">strategies</text>
+    <text x="134" y="250" text-anchor="middle" font-size="10" fill="#3f7a52">策略插件 · 自动注册</text>
+    <text x="134" y="272" text-anchor="middle" font-size="10.5" font-weight="700" fill="#2d7a45">依赖：core · engine · indicators</text>
+
+    <rect x="248" y="208" width="196" height="80" rx="10" fill="#d5ecdc" stroke="#7fc08f" stroke-width="1.5"/>
+    <text x="346" y="232" text-anchor="middle" font-size="13" font-weight="700" fill="#245c34">signals</text>
+    <text x="346" y="250" text-anchor="middle" font-size="10" fill="#3f7a52">8 态状态机 · 重试 · 对账</text>
+    <text x="346" y="272" text-anchor="middle" font-size="10.5" font-weight="700" fill="#2d7a45">依赖：core · store</text>
+
+    <rect x="460" y="208" width="196" height="80" rx="10" fill="#d5ecdc" stroke="#7fc08f" stroke-width="1.5"/>
+    <text x="558" y="232" text-anchor="middle" font-size="13" font-weight="700" fill="#245c34">positions</text>
+    <text x="558" y="250" text-anchor="middle" font-size="10" fill="#3f7a52">仓位统一 · 止损 · 冷却</text>
+    <text x="558" y="272" text-anchor="middle" font-size="10.5" font-weight="700" fill="#2d7a45">依赖：core · store</text>
+  </g>
+
+  <!-- ③ 适配层 -->
+  <g>
+    <rect x="24" y="316" width="656" height="126" rx="14" fill="#fdf6e0" stroke="#f0e2b8"/>
+    <text x="40" y="340" font-size="12.5" font-weight="700" fill="#94741c">③ 适配层（端口 / 适配器）</text>
+    <rect x="36" y="350" width="196" height="80" rx="10" fill="#f7ecc8" stroke="#d9bb63" stroke-width="1.5"/>
+    <text x="134" y="374" text-anchor="middle" font-size="13" font-weight="700" fill="#7a5f14">broker</text>
+    <text x="134" y="392" text-anchor="middle" font-size="10" fill="#8d742e">交易网关 · 回测撮合</text>
+    <text x="134" y="414" text-anchor="middle" font-size="10.5" font-weight="700" fill="#8a6a1c">依赖：core · signals</text>
+
+    <rect x="248" y="350" width="196" height="80" rx="10" fill="#f7ecc8" stroke="#d9bb63" stroke-width="1.5"/>
+    <text x="346" y="374" text-anchor="middle" font-size="13" font-weight="700" fill="#7a5f14">data</text>
+    <text x="346" y="392" text-anchor="middle" font-size="10" fill="#8d742e">KlineClient · Feed 聚合</text>
+    <text x="346" y="414" text-anchor="middle" font-size="10.5" font-weight="700" fill="#8a6a1c">依赖：core</text>
+
+    <rect x="460" y="350" width="196" height="80" rx="10" fill="#f7ecc8" stroke="#d9bb63" stroke-width="1.5"/>
+    <text x="558" y="374" text-anchor="middle" font-size="13" font-weight="700" fill="#7a5f14">engine</text>
+    <text x="558" y="392" text-anchor="middle" font-size="10" fill="#8d742e">交易所 SPI · strategy 运行时</text>
+    <text x="558" y="408" text-anchor="middle" font-size="10.5" font-weight="700" fill="#8a6a1c">依赖：core · positions · signals</text>
+    <text x="558" y="424" text-anchor="middle" font-size="10.5" font-weight="700" fill="#8a6a1c">· indicators · store</text>
+  </g>
+
+  <!-- ④ 核心 / 支撑 -->
+  <g>
+    <rect x="24" y="458" width="656" height="126" rx="14" fill="#fceaf0" stroke="#f4d3de"/>
+    <text x="40" y="482" font-size="12.5" font-weight="700" fill="#b04a68">④ 核心 / 支撑（纯逻辑 · 零 IO）</text>
+    <rect x="36" y="492" width="196" height="80" rx="10" fill="#f7d8e2" stroke="#e093aa" stroke-width="1.5"/>
+    <text x="134" y="516" text-anchor="middle" font-size="13" font-weight="700" fill="#94334f">indicators</text>
+    <text x="134" y="534" text-anchor="middle" font-size="10" fill="#a8576e">指标计算（纯函数）</text>
+    <text x="134" y="556" text-anchor="middle" font-size="10.5" font-weight="700" fill="#a04262">依赖：（无 · 仅 talib-rs）</text>
+
+    <rect x="248" y="492" width="196" height="80" rx="10" fill="#f7d8e2" stroke="#e093aa" stroke-width="1.5"/>
+    <text x="346" y="516" text-anchor="middle" font-size="13" font-weight="700" fill="#94334f">store</text>
+    <text x="346" y="534" text-anchor="middle" font-size="10" fill="#a8576e">内存总表 · 日快照 · recover</text>
+    <text x="346" y="556" text-anchor="middle" font-size="10.5" font-weight="700" fill="#a04262">依赖：（无）</text>
+
+    <rect x="460" y="492" width="196" height="80" rx="10" fill="#f7d8e2" stroke="#e093aa" stroke-width="1.5"/>
+    <text x="558" y="516" text-anchor="middle" font-size="13" font-weight="700" fill="#94334f">core</text>
+    <text x="558" y="534" text-anchor="middle" font-size="10" fill="#a8576e">模型 · 状态机 · 纯函数</text>
+    <text x="558" y="556" text-anchor="middle" font-size="10.5" font-weight="700" fill="#a04262">依赖：（无）</text>
+  </g>
+</svg>

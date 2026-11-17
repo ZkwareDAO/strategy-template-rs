@@ -1,0 +1,76 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 540" width="980" height="540"
+     font-family="Noto Sans SC, Microsoft YaHei, PingFang SC, Segoe UI, sans-serif">
+  <defs>
+    <marker id="arr" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto">
+      <polygon points="0,0 10,5 0,10" fill="#3b5f94"/>
+    </marker>
+    <marker id="arrGray" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto">
+      <polygon points="0,0 10,5 0,10" fill="#7c8aa0"/>
+    </marker>
+  </defs>
+
+  <rect x="0" y="0" width="980" height="540" fill="#ffffff"/>
+  <text x="28" y="38" font-size="17" font-weight="700" fill="#1f2937">部署形态 · 运行时任务拓扑（live）</text>
+  <text x="28" y="58" font-size="11" fill="#6b7280">§1.3 · 并发执行体 ≈ 2N + 2 +（策略类型数）· N = 运行实例数</text>
+
+  <!-- 外部服务（kline 已并入） -->
+  <rect x="20" y="150" width="170" height="180" rx="10" fill="#d8e7fa" stroke="#8ab4e8" stroke-width="1.5"/>
+  <text x="105" y="184" text-anchor="middle" font-size="13" font-weight="700" fill="#1e4d8c">trading-service</text>
+  <text x="105" y="206" text-anchor="middle" font-size="10" fill="#3c6094">唯一外部服务</text>
+  <text x="105" y="234" text-anchor="middle" font-size="10" fill="#3c6094">交易接口：下单/回报/查仓</text>
+  <text x="105" y="254" text-anchor="middle" font-size="10" fill="#3c6094">K线接口：订阅/回填/推送</text>
+  <text x="105" y="282" text-anchor="middle" font-size="10" fill="#3c6094">同端点 · 同 HMAC 鉴权</text>
+
+  <!-- WS task 列（kline 已并入交易连接，仅存 router 扇出） -->
+  <rect x="250" y="96" width="190" height="72" rx="10" fill="#e3d8f7" stroke="#a98fe0" stroke-width="1.5"/>
+  <text x="345" y="124" text-anchor="middle" font-size="12.5" font-weight="700" fill="#4c2e94">ts_kline router task ×1</text>
+  <text x="345" y="146" text-anchor="middle" font-size="10" fill="#6a4fa3">水位去重 → per-symbol 扇出</text>
+
+  <rect x="250" y="316" width="190" height="72" rx="10" fill="#e3d8f7" stroke="#a98fe0" stroke-width="1.5"/>
+  <text x="345" y="344" text-anchor="middle" font-size="12.5" font-weight="700" fill="#4c2e94">交易 WS task ×策略类型</text>
+  <text x="345" y="366" text-anchor="middle" font-size="10" fill="#6a4fa3">订单 + K线同连接 · 懒连接池</text>
+
+  <!-- T7 forwarder -->
+  <rect x="480" y="316" width="120" height="72" rx="10" fill="#e3d8f7" stroke="#a98fe0" stroke-width="1.5"/>
+  <text x="540" y="344" text-anchor="middle" font-size="12" font-weight="700" fill="#4c2e94">T7 forwarder</text>
+  <text x="540" y="366" text-anchor="middle" font-size="10" fill="#6a4fa3">task ×1 · 路由</text>
+
+  <!-- 运行实例组 -->
+  <rect x="640" y="80" width="320" height="380" rx="16" fill="#f6f1fc" stroke="#d9ccf5" stroke-width="1.5"/>
+  <text x="658" y="108" font-size="12.5" font-weight="700" fill="#6b47b8">运行实例 ×N（每 symbol / 实例）</text>
+
+  <rect x="660" y="126" width="280" height="164" rx="10" fill="#e3d8f7" stroke="#a98fe0" stroke-width="1.5"/>
+  <text x="800" y="162" text-anchor="middle" font-size="13" font-weight="700" fill="#4c2e94">RuntimeActor 内核 ×N</text>
+  <text x="800" y="188" text-anchor="middle" font-size="10.5" fill="#6a4fa3">专用 OS 线程 · current_thread runtime</text>
+  <text x="800" y="210" text-anchor="middle" font-size="10.5" fill="#6a4fa3">Feed + 策略 + 信号 + 仓位</text>
+  <text x="800" y="232" text-anchor="middle" font-size="11" font-weight="700" fill="#4c2e94">单写者内核（无锁串行）</text>
+
+  <rect x="660" y="322" width="280" height="110" rx="10" fill="#e3d8f7" stroke="#a98fe0" stroke-width="1.5" stroke-dasharray="6 4"/>
+  <text x="800" y="358" text-anchor="middle" font-size="12.5" font-weight="700" fill="#4c2e94">监督 task ×N</text>
+  <text x="800" y="382" text-anchor="middle" font-size="10.5" fill="#6a4fa3">panic 整代重建</text>
+  <text x="800" y="404" text-anchor="middle" font-size="10.5" fill="#6a4fa3">重新订阅 + 事件重放</text>
+
+  <!-- 箭头 -->
+  <line x1="190" y1="240" x2="244" y2="352" stroke="#3b5f94" stroke-width="1.8" marker-end="url(#arr)"/>
+  <text x="196" y="300" text-anchor="middle" font-size="10" fill="#4b5563" paint-order="stroke" stroke="#ffffff" stroke-width="4" stroke-linejoin="round">交易+K线帧（同连接）</text>
+
+  <line x1="345" y1="316" x2="345" y2="174" stroke="#3b5f94" stroke-width="1.8" marker-end="url(#arr)"/>
+  <text x="390" y="250" text-anchor="middle" font-size="10" fill="#4b5563" paint-order="stroke" stroke="#ffffff" stroke-width="4" stroke-linejoin="round">kline_updates()</text>
+
+  <path d="M440,120 C 520,120 560,150 654,178" fill="none" stroke="#3b5f94" stroke-width="1.8" marker-end="url(#arr)"/>
+  <text x="530" y="112" text-anchor="middle" font-size="10.5" fill="#4b5563" paint-order="stroke" stroke="#ffffff" stroke-width="4" stroke-linejoin="round">broadcast 扇出 · Lagged 自愈</text>
+
+  <line x1="440" y1="352" x2="474" y2="352" stroke="#3b5f94" stroke-width="1.8" marker-end="url(#arr)"/>
+  <text x="457" y="340" text-anchor="middle" font-size="10" fill="#4b5563" paint-order="stroke" stroke="#ffffff" stroke-width="4" stroke-linejoin="round">mpsc</text>
+
+  <path d="M600,352 C 630,352 630,240 654,230" fill="none" stroke="#3b5f94" stroke-width="1.8" marker-end="url(#arr)"/>
+  <text x="622" y="300" text-anchor="middle" font-size="10" fill="#4b5563" paint-order="stroke" stroke="#ffffff" stroke-width="4" stroke-linejoin="round">OrderUpdate</text>
+
+  <line x1="800" y1="322" x2="800" y2="296" stroke="#7c8aa0" stroke-width="1.8" stroke-dasharray="6 4" marker-end="url(#arrGray)"/>
+  <text x="812" y="314" font-size="10" fill="#7c8aa0">重建</text>
+
+  <!-- 底注 -->
+  <rect x="20" y="482" width="940" height="42" rx="10" fill="#f8fafc" stroke="#d8e0ea"/>
+  <text x="36" y="508" font-size="11" fill="#4b5563">回测形态：单线程顺序驱动（spi_backtest），无 WS task，Store 独占，结束时一次性 flush · 另有 flush 时 spawn_blocking</text>
+</svg>
