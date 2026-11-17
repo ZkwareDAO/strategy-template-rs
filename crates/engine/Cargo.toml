@@ -1,0 +1,30 @@
+[package]
+name = "strategy-engine"
+description = "Unified engine: pluggable rules shared by live trading and backtest"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+strategy-core.workspace = true
+strategy-positions.workspace = true
+# 阶段 4（v2.7，§17）：live 桥复用信号状态机（SignalManager/AsyncOrderGateway
+# 端口类型）；不引 broker——网关 await 由外层 actor 驱动，依赖方向保持
+# exchanges → (core, signals)，网关实现留在 app 组装根。
+strategy-signals.workspace = true
+# Task 5（PR-2）：特征流水线（adx/rsi/ema/sma/atr/macd）复用统一指标封装
+strategy-indicators.workspace = true
+rust_decimal.workspace = true
+tracing.workspace = true
+chrono.workspace = true
+sha2.workspace = true
+strategy-store.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+# 阶段 4 桥验收：SignalManager 构造需要进程级 Store；channel 源测试需要临时目录
+tempfile.workspace = true
+# Task 4（PR-1/PR-2）：配置 schema 内联测试解析 §5.1 YAML 示例
+serde_yaml.workspace = true
