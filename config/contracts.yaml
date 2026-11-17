@@ -1,0 +1,322 @@
+# ============================================================
+# 国内期货合约参数（回测撮合直接读取）
+# ============================================================
+# 用途：让回测按真实期货规则成交——
+#   - 开仓手数 = min(按保证金可负担手数, 权益 × leverage / 每手名义金额)，必须为整数
+#   - 手续费按开仓/平仓/平今分别计费（rate = 成交金额比例；per_lot = 元/手）
+#   - 盈亏按「价差 × 合约乘数 × 手数」结算
+#   - 保证金率决定交易所允许的最大杠杆；yaml 的 leverage 是策略自选名义敞口上限
+#   - session_opens/session_closes 定义日盘/夜盘开盘、收盘时刻（只填真正的
+#     日盘/夜盘开关盘，不填 10:15/11:30 等盘中休息）；开盘后/收盘前 N 分钟
+#     禁止开/平/反手
+#
+# 数据来源（更新日期 2026-10-27）：
+#   - 上期所《上海期货交易所收费一览表》（2026-09-07）：
+#     https://www.shfe.com.cn/reports/businessdata/feeandcharges/
+#   - 上期所每日结算参数（2026-10-26，一般持仓保证金率/合约乘数）：
+#     https://www.shfe.com.cn/data/tradedata/future/dailydata/js20261026.dat
+#   - 平今手续费（上期所各品种当前标准，2026-10-27 核对）：
+#     https://www.9qihuo.com/qihuoshouxufeisingle?heyue=cu （au/ag/rb/ru 同理）
+#   - 大商所铁矿石（I）：交易所公开标准（2026-10-27 核对：开/平/平今均为万分之一，
+#     交易所保证金 8%）。不同月份/公告会调整，请以交易所最新结算参数表为准。
+#     参考：https://www.9qihuo.com/qihuoshouxufeisingle?heyue=i
+#
+# 注意：
+#   1. 表中为「交易所标准」。期货公司通常加收保证金 2~5 个百分点、
+#      手续费可能上浮，请按自己的账户在 contracts 中覆盖对应字段。
+#   2. 手续费模式：rate 的数值是比例（0.00005 = 万分之 0.5）；
+#      per_lot 的数值是元/手。
+#   3. close_today 缺省 = close；配置后同一 CTP 交易日平仓按平今计费。
+#   4. 未在此文件声明的 symbol 走 crypto/兼容模式（小数数量 + --fee-rate）。
+#
+# 覆盖优先级（高 → 低）：
+#   per-symbol 配置里的 contracts: > 本文件 > 内核默认
+# ============================================================
+
+contracts:
+  # 上期所 铜（5 吨/手，最小变动 10 元/吨）
+  CU:
+    name: 铜
+    multiplier: 5
+    tick_size: 10
+    margin_rate: 0.11
+    min_lots: 1
+    session_opens: ["09:00", "21:00"]
+    no_trade_after_open_minutes: 5
+    session_closes: ["15:00", "01:00"]
+    no_trade_before_close_minutes: 5
+    commission:
+      mode: rate
+      open: 0.00005          # 0.05‰
+      close: 0.00005
+      close_today: 0.0001    # 平今 1‱（开仓 0.5‱）
+
+  # ============================================================
+  # 上期所 铜跨期套利合成标的 CUSP = 主力 − 次主力 + 100000
+  # （由 crates/data/src/bin/spread_prep.rs 生成；cta_spread_arb_v1 使用）
+  # 单标的引擎下的两腿经济量纲换算（与策略模块文档一致）：
+  #   - 价差 1 点 = 每组合 5 元（每腿 5 吨/手）→ multiplier: 5
+  #   - 保证金按两腿合计：0.11 × 2 = 0.22（合成名义 ≈ 主腿名义 50 万元级，
+  #     基准 100000 对齐 2025-2026 铜价；早期低铜价段会略高估，方向保守）
+  #   - 手续费按两腿合计走 per_lot：CU 单腿 0.05‱×(主力名义≈铜价×5)，
+  #     跨期持仓过夜=平昨不涉平今。取铜价中位口径（~8万）：单腿开≈20元/手，
+  #     两腿≈40元/手·边 → open/close=40。用 per_lot 而非 rate：合成价 base
+  #     恒为 100000，rate 会在低铜价年（5万）高估费用、吞噬套利毛收益。
+  #     平今合计 80（两腿 0.1‱，本策略几乎不触发）。
+  #   - 时段与 CU 相同（价差两腿同交易所同时段交易）
+  # ============================================================
+  CUSP:
+    name: 铜跨性价差（主力-次主力）
+    multiplier: 5
+    tick_size: 10
+    margin_rate: 0.22
+    min_lots: 1
+    session_opens: ["09:00", "21:00"]
+    no_trade_after_open_minutes: 5
+    session_closes: ["15:00", "01:00"]
+    no_trade_before_close_minutes: 5
+    commission:
+      mode: per_lot
+      open: 40.0              # 两腿合计 元/手·开
+      close: 40.0             # 两腿合计 元/手·平昨
+      close_today: 80.0       # 两腿平今（跨期过夜基本不触发）
+
+  # 上期所 黄金（1000 克/手，最小变动 0.02 元/克）
+  AU:
+    name: 黄金
+    multiplier: 1000
+    tick_size: 0.02
+    margin_rate: 0.16
+    min_lots: 1
+    session_opens: ["09:00", "21:00"]
+    no_trade_after_open_minutes: 5
+    session_closes: ["15:00", "02:30"]
+    no_trade_before_close_minutes: 5
+    commission:
+      mode: per_lot
+      open: 20.0             # 20 元/手
+      close: 20.0
+      close_today: 0.0       # 平今免收
+
+  # 上期所 白银（15 千克/手，最小变动 1 元/千克）
+  AG:
+    name: 白银
+    multiplier: 15
+    tick_size: 1
+    margin_rate: 0.22
+    min_lots: 1
+    session_opens: ["09:00", "21:00"]
+    no_trade_after_open_minutes: 5
+    session_closes: ["15:00", "02:30"]
+    no_trade_before_close_minutes: 5
+    commission:
+      mode: rate
+      open: 0.00005          # 0.05‰
+      close: 0.00005
+      close_today: 0.00005   # 平今同开仓 0.5‱
+
+  # 上期所 螺纹钢（10 吨/手，最小变动 1 元/吨）
+  RB:
+    name: 螺纹钢
+    multiplier: 10
+    tick_size: 1
+    margin_rate: 0.10
+    min_lots: 1
+    session_opens: ["09:00", "21:00"]
+    no_trade_after_open_minutes: 5
+    session_closes: ["15:00", "23:00"]
+    no_trade_before_close_minutes: 5
+    commission:
+      mode: rate
+      open: 0.0001           # 0.1‰
+      close: 0.0001
+      close_today: 0.0001    # 平今同开仓 1‱
+
+  # 上期所 天然橡胶（10 吨/手，最小变动 5 元/吨）
+  RU:
+    name: 天然橡胶
+    multiplier: 10
+    tick_size: 5
+    margin_rate: 0.10
+    min_lots: 1
+    session_opens: ["09:00", "21:00"]
+    no_trade_after_open_minutes: 5
+    session_closes: ["15:00", "23:00"]
+    no_trade_before_close_minutes: 5
+    commission:
+      mode: per_lot
+      open: 3.0              # 3 元/手
+      close: 3.0
+      close_today: 0.0       # 平今免收
+
+  # 上期所 燃料油（10 吨/手，最小变动 1 元/吨）
+  FU:
+    name: 燃料油
+    multiplier: 10
+    tick_size: 1
+    margin_rate: 0.16
+    min_lots: 1
+    session_opens: ["09:00", "21:00"]
+    no_trade_after_open_minutes: 5
+    session_closes: ["15:00", "23:00"]
+    no_trade_before_close_minutes: 5
+    commission:
+      mode: rate
+      open: 0.00005          # 0.5‱
+      close: 0.00005
+      close_today: 0.0       # 平今免收
+
+  # 上期所 石油沥青（10 吨/手，最小变动 1 元/吨）
+  BU:
+    name: 石油沥青
+    multiplier: 10
+    tick_size: 1
+    margin_rate: 0.12
+    min_lots: 1
+    session_opens: ["09:00", "21:00"]
+    no_trade_after_open_minutes: 5
+    session_closes: ["15:00", "23:00"]
+    no_trade_before_close_minutes: 5
+    commission:
+      mode: rate
+      open: 0.00005          # 0.5‱
+      close: 0.00005
+      close_today: 0.0       # 平今免收
+
+  # 上期所 纸浆（10 吨/手，最小变动 2 元/吨）
+  SP:
+    name: 纸浆
+    multiplier: 10
+    tick_size: 2
+    margin_rate: 0.10
+    min_lots: 1
+    session_opens: ["09:00", "21:00"]
+    no_trade_after_open_minutes: 5
+    session_closes: ["15:00", "23:00"]
+    no_trade_before_close_minutes: 5
+    commission:
+      mode: rate
+      open: 0.00002          # 0.2‱
+      close: 0.00002
+      close_today: 0.0       # 平今免收
+
+  # 上期所 丁二烯橡胶（5 吨/手，最小变动 5 元/吨）
+  BR:
+    name: 丁二烯橡胶
+    multiplier: 5
+    tick_size: 5
+    margin_rate: 0.12
+    min_lots: 1
+    session_opens: ["09:00", "21:00"]
+    no_trade_after_open_minutes: 5
+    session_closes: ["15:00", "23:00"]
+    no_trade_before_close_minutes: 5
+    commission:
+      mode: rate
+      open: 0.00002          # 0.2‱
+      close: 0.00002
+      close_today: 0.00002   # 平今同开仓 0.2‱
+
+  # 大商所 铁矿石（100 吨/手，最小变动 0.5 元/吨）
+  I:
+    name: 铁矿石
+    multiplier: 100
+    tick_size: 0.5
+    margin_rate: 0.08
+    min_lots: 1
+    session_opens: ["09:00", "21:00"]
+    no_trade_after_open_minutes: 5
+    session_closes: ["15:00", "23:00"]
+    no_trade_before_close_minutes: 5
+    commission:
+      mode: rate
+      open: 0.0001           # 万分之一（2026-10 公开标准）
+      close: 0.0001
+      close_today: 0.0001    # 平今同开仓
+
+  # ============================================================
+  # 跨期套利合成价差标的（spread_prep --product X 生成；cta_spread_arb_v1 使用）
+  # 统一口径：multiplier=品种每手吨数（价差 1 点/克 = mult 元/组）；
+  #   margin_rate = 两腿交易所保证金合计；commission per_lot = 两腿合计
+  #   元/组·单边（按该品种中位价折算，避免 rate×固定基准跨年代失真——CU 教训）；
+  #   时段复制品种条目。基准价见各 config/cta_spread_arb_v1/{SYM}.yaml spread_base。
+  # ============================================================
+  AUSP:
+    name: 黄金跨性价差（主力-次主力）
+    multiplier: 1000
+    tick_size: 0.02
+    margin_rate: 0.32
+    min_lots: 1
+    session_opens: ["09:00", "21:00"]
+    no_trade_after_open_minutes: 5
+    session_closes: ["15:00", "02:30"]
+    no_trade_before_close_minutes: 5
+    commission:
+      mode: per_lot
+      open: 40.0             # 两腿 20+20 元/组·开
+      close: 40.0
+      close_today: 0.0       # AU 平今免收
+
+  AGSP:
+    name: 白银跨性价差（主力-次主力）
+    multiplier: 15
+    tick_size: 1
+    margin_rate: 0.44
+    min_lots: 1
+    session_opens: ["09:00", "21:00"]
+    no_trade_after_open_minutes: 5
+    session_closes: ["15:00", "02:30"]
+    no_trade_before_close_minutes: 5
+    commission:
+      mode: per_lot
+      open: 12.0             # 两腿 0.05‱×8000×15×2
+      close: 12.0
+      close_today: 12.0      # AG 平今同开仓
+
+  RBSP:
+    name: 螺纹钢跨性价差（主力-次主力）
+    multiplier: 10
+    tick_size: 1
+    margin_rate: 0.20
+    min_lots: 1
+    session_opens: ["09:00", "21:00"]
+    no_trade_after_open_minutes: 5
+    session_closes: ["15:00", "23:00"]
+    no_trade_before_close_minutes: 5
+    commission:
+      mode: per_lot
+      open: 6.0              # 两腿 1‱×3000×10×2
+      close: 6.0
+      close_today: 6.0
+
+  RUSP:
+    name: 橡胶跨性价差（主力-次主力）
+    multiplier: 10
+    tick_size: 5
+    margin_rate: 0.20
+    min_lots: 1
+    session_opens: ["09:00", "21:00"]
+    no_trade_after_open_minutes: 5
+    session_closes: ["15:00", "23:00"]
+    no_trade_before_close_minutes: 5
+    commission:
+      mode: per_lot
+      open: 6.0              # 两腿 3+3 元/组·开
+      close: 6.0
+      close_today: 0.0       # RU 平今免收
+
+  ISP:
+    name: 铁矿石跨性价差（主力-次主力）
+    multiplier: 100
+    tick_size: 0.5
+    margin_rate: 0.16
+    min_lots: 1
+    session_opens: ["09:00", "21:00"]
+    no_trade_after_open_minutes: 5
+    session_closes: ["15:00", "23:00"]
+    no_trade_before_close_minutes: 5
+    commission:
+      mode: per_lot
+      open: 13.0             # 两腿 1‱×650×100×2
+      close: 13.0
+      close_today: 13.0

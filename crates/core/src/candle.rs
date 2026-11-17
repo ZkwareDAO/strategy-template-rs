@@ -23,7 +23,7 @@ pub struct Candle {
     pub active_buy_volume: f64,
     /// 主动买入成交额（计价币）
     pub active_buy_quote_volume: f64,
-    /// 是否已闭合（实盘 WS 会推未闭合快照；聚合/指标只消费 true）
+    /// 是否已闭合（当前 live 通道只推定稿 1m；历史 CSV 恒 true；聚合/指标只消费 true）
     pub is_closed: bool,
 }
 

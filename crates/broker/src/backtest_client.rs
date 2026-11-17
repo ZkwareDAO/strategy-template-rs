@@ -11,7 +11,9 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
-use strategy_core::signal::{Action, SignalIntent};
+use strategy_core::signal::SignalIntent;
+
+use crate::Action;
 use strategy_core::OrderState;
 use strategy_signals::gateway::{
     AsyncOrderGateway, OrderGateway, OrderSnapshot, PositionsFuture, QueryFuture, ReadyFill,
@@ -53,15 +55,38 @@ impl BacktestOrderClient {
 
     fn intent_to_action(intent: &SignalIntent) -> Action {
         match intent.kind {
-            strategy_core::IntentKind::Open | strategy_core::IntentKind::Reverse => {
-                // Reverse 在意图层已拆成先平后开两条，这里各自映射
-                Action::Open {
-                    side: intent.direction,
-                    price: intent.price,
-                    stop_price: intent.stop_price.unwrap_or(0.0),
-                    atr: 0.0,
-                    strength: 1.0,
-                    reason: String::new(),
+            strategy_core::IntentKind::Open => Action::Open {
+                side: intent.direction,
+                price: intent.price,
+                stop_price: intent.stop_price.unwrap_or(0.0),
+                atr: 0.0,
+                strength: 1.0,
+                reason: String::new(),
+            },
+            strategy_core::IntentKind::Reverse => {
+                // C15（阶段 3 双跑发现的旧链路潜伏缺陷）：Reverse 在意图层拆成
+                // 「先平后开」两条——平仓意图 size>0、开仓意图 size==0。此前两类
+                // 一律映射成 Action::Open：平仓单被 broker「已有持仓」分支吞掉、
+                // 开仓单又被未平掉的旧仓吞掉 → 反手在旧回测链路永不成交。
+                // 现有 backtest_e2e 从不产生 Reverse，缺陷零暴露；双跑样本必须覆盖
+                // 反手（§12-6），故先修复本适配器（engine.rs 一行不改）。
+                if intent.size > 0.0 {
+                    Action::Close {
+                        price: intent.price,
+                        reason: String::new(),
+                        // 与 Close 档同判据：反手携带 stop_order_id 即止损性反手
+                        is_stop_loss: intent.stop_order_id.is_some(),
+                        strength: 1.0,
+                    }
+                } else {
+                    Action::Open {
+                        side: intent.direction,
+                        price: intent.price,
+                        stop_price: intent.stop_price.unwrap_or(0.0),
+                        atr: 0.0,
+                        strength: 1.0,
+                        reason: String::new(),
+                    }
                 }
             }
             strategy_core::IntentKind::Close => Action::Close {
@@ -106,6 +131,8 @@ impl OrderGateway for BacktestOrderClient {
                 exchange_order_id: None,
                 filled_quantity_raw: None,
                 place: None,
+                // paper 撮合的内核手续费是确定值：随快照带回（阶段 4 fee 通道）
+                fee: Some(f.fee),
             })
             .ok_or_else(|| SubmitError::rejected(format!("回测无此订单: {order_id}")))
     }
@@ -182,6 +209,7 @@ mod tests {
             stop_order_id: None,
             created_event_time: t(),
             status: SignalStatus::Created,
+            offset: None,
         }
     }
 

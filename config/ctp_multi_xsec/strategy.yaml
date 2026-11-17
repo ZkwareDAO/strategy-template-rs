@@ -1,0 +1,38 @@
+# futures_xsec_trend — 期货 1:N 样例：一个策略、一个组合总仓、三个子仓。
+#
+# merge_positions: true 把 RB/I/CU 的仓位合并到同一总仓；每标的一个子仓，
+# 由 rebalance 窗口按 H1 动量决定谁进 top_2。
+strategy_type: futures_xsec_trend
+strategy_id: futures_xsec_trend:shfe
+
+merge_positions: true
+
+universe:
+  - { symbol: RB, exchange: SHFE }
+  - { symbol: I, exchange: SHFE }
+  - { symbol: CU, exchange: SHFE }
+
+# [0] = 决策周期（15m 调仓计数）；1h 是动量/趋势过滤周期。
+timeframes: [15m, 1h]
+
+indicators: {}
+entry: { default: [] }
+exit: { default: [] }
+
+# 单品种 ATR 止损在策略内；L3 组合止损作最后兜底。
+portfolio_exit: { trailing: null, stop_loss_pct: 8 }
+
+# 每 12 根 15m（3 小时）轮换一次；只做多，空头侧本期未实现。
+rebalance: { every_bars: 12, top_k: 2, bottom_k: 0, weight_scheme: equal }
+
+# 2 手 top_k × 单仓 0.20 = 0.40，留足总仓 0.80 的容量给调仓加仓。
+risk: { max_total_notional: 0.80 }
+sizing: { per_position_pct: 0.20, max_position_pct: 0.40 }
+
+params:
+  lookback: 12
+  trend_ema: 60
+  trend_tf: "1h"
+  atr_period: 14
+  atr_stop_mult: 2.0
+  top_k: 2
