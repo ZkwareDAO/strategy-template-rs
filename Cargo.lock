@@ -1902,6 +1902,7 @@ dependencies = [
  "strategy-broker",
  "strategy-core",
  "strategy-data",
+ "strategy-engine",
  "strategy-positions",
  "strategy-signals",
  "strategy-store",
@@ -1954,16 +1955,33 @@ dependencies = [
  "anyhow",
  "chrono",
  "csv",
- "futures-util",
  "reqwest",
  "serde",
- "serde_json",
  "strategy-core",
  "tempfile",
  "tokio",
- "tokio-tungstenite",
  "tracing",
  "zip",
+]
+
+[[package]]
+name = "strategy-engine"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "rust_decimal",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "sha2",
+ "strategy-core",
+ "strategy-indicators",
+ "strategy-positions",
+ "strategy-signals",
+ "strategy-store",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tracing",
 ]
 
 [[package]]
@@ -2010,6 +2028,7 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "csv",
+ "parking_lot",
  "serde",
  "serde_json",
  "tempfile",
@@ -2026,9 +2045,8 @@ dependencies = [
  "serde",
  "serde_json",
  "strategy-core",
+ "strategy-engine",
  "strategy-indicators",
- "strategy-positions",
- "strategy-signals",
  "tracing",
 ]
 
