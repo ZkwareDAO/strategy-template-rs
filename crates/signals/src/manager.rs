@@ -1,6 +1,7 @@
 //! SignalManager —— 信号全生命周期（设计文档 §5.2；S3 统一 Store 后端）
 //!
-//! 同步内核：回测逐根 K 线直接调用（确定性，不 spawn）；live 由 RuntimeActor
+//! 同步内核：回测逐根 K 线直接调用（确定性，不 spawn）；live 由 actor
+//! （`app::spi_live_actor`，旧 `RuntimeActor` 已随 R4 退役删除）
 //! 在同一 task 内调用，网络侧经 [`crate::gateway::AsyncOrderGateway`] await。
 //!
 //! 存储：信号当前态 [`ManagedSignal`] 是进程共享统一 Store 中 `NAME="signal"`
@@ -222,11 +223,6 @@ impl SignalManager {
         }
     }
 
-    pub fn with_validator(mut self, validator: Arc<dyn SignalValidator>) -> Self {
-        self.validator = validator;
-        self
-    }
-
     pub fn with_retry_policy(mut self, retry: RetryPolicy) -> Self {
         self.retry = retry;
         self
@@ -259,6 +255,17 @@ impl SignalManager {
 
     pub fn is_empty(&self) -> bool {
         self.own_rows().is_empty()
+    }
+
+    /// 开仓已终态失败且零成交（交易所明确拒单或重试预算耗尽）：对应挂单行
+    /// 永远不会再成交，外壳必须据此撤出子仓行，否则永久停在 OpenRequested。
+    pub fn is_abandoned_open(&self, signal_id: &str) -> bool {
+        self.table.get(signal_id).is_some_and(|m| {
+            m.intent.kind == IntentKind::Open
+                && m.status == SignalStatus::Failed
+                && m.next_retry_at.is_none()
+                && m.filled_quantity.unwrap_or(0.0) <= 0.0
+        })
     }
 
     pub fn status_of(&self, signal_id: &str) -> Option<SignalStatus> {
@@ -402,7 +409,8 @@ impl SignalManager {
         Ok(Some(self.submit_request(&id, now)))
     }
 
-    /// 订单状态回调 → 信号状态；完全成交时返回 FillEvent 交仓位管理。
+    /// 订单状态回调（阶段 4 前的兼容外壳：不带 fee，FillEvent.fee 恒 0 兜底）。
+    /// 实盘路径请改用 [`Self::handle_order_update_fee`]。
     #[allow(clippy::too_many_arguments)]
     pub fn handle_order_update(
         &mut self,
@@ -413,8 +421,40 @@ impl SignalManager {
         avg_price: f64,
         filled_quantity_raw: Option<String>,
         frame_signal_id: Option<&str>,
+        reject_message: Option<&str>,
+        now: DateTime<Utc>,
+    ) -> std::io::Result<Option<FillEvent>> {
+        self.handle_order_update_fee(
+            order_id,
+            exchange_order_id,
+            state,
+            filled_size,
+            avg_price,
+            filled_quantity_raw,
+            frame_signal_id,
+            reject_message,
+            None,
+            now,
+        )
+    }
+
+    /// 订单状态回调 → 信号状态；完全成交时返回 FillEvent 交仓位管理。
+    /// `fee`（阶段 4 v2.7）：回报帧携带的真实手续费；None ⇒ 服务端未回传，
+    /// FillEvent.fee 落 0（旧行为）。
+    #[allow(clippy::too_many_arguments)]
+    pub fn handle_order_update_fee(
+        &mut self,
+        order_id: &str,
+        exchange_order_id: Option<&str>,
+        state: OrderState,
+        filled_size: f64,
+        avg_price: f64,
+        filled_quantity_raw: Option<String>,
+        frame_signal_id: Option<&str>,
         // Rejected 帧携带的交易所原文（审计；外壳据此识别 ReduceOnly 拒单）
         reject_message: Option<&str>,
+        // 回报帧真实手续费（§13-4：FillEvent.fee 不再恒 0）
+        fee: Option<f64>,
         now: DateTime<Utc>,
     ) -> std::io::Result<Option<FillEvent>> {
         let signal_id = if let Some(sid) = self.order_index.get(order_id).cloned() {
@@ -525,6 +565,7 @@ impl SignalManager {
                     filled_size,
                     avg_price,
                     filled_quantity_raw,
+                    fee,
                     now,
                 )))
             }
@@ -551,6 +592,7 @@ impl SignalManager {
                         filled_size,
                         avg_price,
                         filled_quantity_raw,
+                        fee,
                         now,
                     )))
                 } else {
@@ -612,43 +654,28 @@ impl SignalManager {
     /// 依赖这些行；裁剪模式的 load_merged 会把终态行拦在表外。
     /// 只补空缺 id，不覆盖内存已有行。
     fn load_filled_open_from_disk(&mut self) -> std::io::Result<()> {
-        let mut merged = std::collections::HashMap::new();
-        let rd = match std::fs::read_dir(self.store.base()) {
-            Ok(rd) => rd,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-            Err(e) => return Err(e),
-        };
-        let mut days: Vec<std::path::PathBuf> = rd
-            .filter_map(|e| e.ok())
-            .map(|e| e.path())
-            .filter(|d| {
-                d.is_dir()
-                    && d.file_name()
-                        .and_then(|n| n.to_str())
-                        .is_some_and(|n| n.len() == 8 && n.bytes().all(|b| b.is_ascii_digit()))
-            })
-            .collect();
-        days.sort();
+        use strategy_store::PersistRecord;
+        let mut merged: std::collections::HashMap<String, PersistRecord> =
+            std::collections::HashMap::new();
+        // 通过 Store 的抽象 API 扫描全部日目录——不再直接调 persist 内部函数，
+        // 存储后端切换（CSV → sled 等）后此路径自动适配。
+        let days = self.store.list_days().map_err(std::io::Error::other)?;
         // 升序扫**全部**日文件：Filled Open / 挂起重试行可能在任意历史日落盘
         // （跨日 rollover 裁剪后最新日文件不再含它们，旧日文件是唯一备份——
         // 旧日文件永不删除，这里就是它们的恢复通道）。同 id 取 updated_at 最新。
-        for d in &days {
-            let file = d.join("signal.csv");
-            if !file.exists() {
-                continue;
-            }
-            let recs = match strategy_store::persist::read_day_csv(&file) {
+        for day in &days {
+            let recs = match self.store.read_table_raw(day, ManagedSignal::NAME) {
                 Ok(r) => r,
                 // 单日损坏不阻断恢复（与 Store 容错纪律一致）
                 Err(e) => {
-                    tracing::warn!(file = %file.display(), error = %e, "信号日文件读取失败，跳过该日");
+                    tracing::warn!(day = %day, error = %e, "信号日文件读取失败，跳过该日");
                     continue;
                 }
             };
             for rec in recs {
                 merged
                     .entry(rec.id.clone())
-                    .and_modify(|cur: &mut strategy_store::persist::CsvRecord| {
+                    .and_modify(|cur: &mut PersistRecord| {
                         if rec.updated_at_ms > cur.updated_at_ms {
                             *cur = rec.clone();
                         }
@@ -659,17 +686,16 @@ impl SignalManager {
         // 主 recover 盘载按 is_terminal 过滤；这里把「重启后仍有用途」的行
         // 按无过滤路径装回：①Filled Open（交叉对账补成交来源）②Failed + 挂起重试
         // （重试队列延续，next_retry_at 未清 = 预算未耗尽）。
-        let resurrect: std::collections::HashMap<String, strategy_store::persist::CsvRecord> =
-            merged
-                .into_iter()
-                .filter(|(_, rec)| rec.deleted == 0)
-                .filter(|(_, rec)| {
-                    serde_json::from_str::<ManagedSignal>(&rec.payload_json).is_ok_and(|row| {
-                        (row.status == SignalStatus::Filled && row.intent.kind == IntentKind::Open)
-                            || (row.status == SignalStatus::Failed && row.next_retry_at.is_some())
-                    })
+        let resurrect: std::collections::HashMap<String, PersistRecord> = merged
+            .into_iter()
+            .filter(|(_, rec)| rec.deleted == 0)
+            .filter(|(_, rec)| {
+                serde_json::from_str::<ManagedSignal>(&rec.payload_json).is_ok_and(|row| {
+                    (row.status == SignalStatus::Filled && row.intent.kind == IntentKind::Open)
+                        || (row.status == SignalStatus::Failed && row.next_retry_at.is_some())
                 })
-                .collect();
+            })
+            .collect();
         if resurrect.is_empty() {
             return Ok(());
         }
@@ -845,6 +871,14 @@ impl SignalManager {
     /// 按 signal_id 直读意图（Rejected 帧未绑路由时按帧内 signal_id 找回）。
     pub fn intent_for_signal(&self, id: &str) -> Option<SignalIntent> {
         self.table.get(id).map(|m| m.intent)
+    }
+
+    /// 该信号行是否属于本实例（多实例共享同一 Store 表：按 `strategy_name`
+    /// 隔离判定）。`intent_for_signal` 是全表查找，**不可**用于归属路由。
+    pub fn owns_signal(&self, id: &str) -> bool {
+        self.table
+            .get(id)
+            .is_some_and(|m| m.strategy_name == self.strategy_name)
     }
 
     pub fn submit_request(&self, id: &str, event_time: DateTime<Utc>) -> SubmitRequest {
@@ -1077,6 +1111,9 @@ impl SignalManager {
     }
 
     /// 按当前行构造 FillEvent（B6：止损/原因/初始止损/意图元数据随意图透传）。
+    // 阶段 4 v2.7 加 fee 入参后 8 项：全为成交事实字段，拆结构体反而
+    // 稀释调用处可读性（调用方已持齐全部字段）。
+    #[allow(clippy::too_many_arguments)]
     fn fill_event(
         &self,
         signal_id: &str,
@@ -1084,6 +1121,7 @@ impl SignalManager {
         filled_size: f64,
         avg_price: f64,
         filled_size_raw: Option<String>,
+        fee: Option<f64>,
         now: DateTime<Utc>,
     ) -> FillEvent {
         let m = self.table.get(signal_id).expect("索引一致");
@@ -1096,7 +1134,9 @@ impl SignalManager {
             m.intent.direction,
             filled_size,
             avg_price,
-            0.0,
+            // 阶段 4（v2.7）：回报带 fee 就用真值——「FillEvent.fee 不再恒 0」
+            // 的数据通道；服务端未回传（None）保持旧兜底 0.0。
+            fee.unwrap_or(0.0),
             now,
         )
         .with_exit(is_stop, reason)
@@ -1155,6 +1195,7 @@ mod tests {
             stop_order_id: None,
             created_event_time: time(),
             status: SignalStatus::Created,
+            offset: None,
         }
     }
 
@@ -1374,6 +1415,58 @@ mod tests {
         assert_eq!(row.status, SignalStatus::Failed);
         assert_eq!(row.next_retry_at, None);
         assert_eq!(row.last_error.as_deref(), Some("down"));
+    }
+
+    /// 阶段 4（v2.7，§13-4）：回报带 fee → FillEvent.fee 落真值；
+    /// 兼容外壳（无 fee 参数）保持 0.0 旧兜底。两条路径同测，
+    /// 证明「不再恒 0」不是靠删兜底实现。
+    #[test]
+    fn order_update_fee_lands_in_fill_event_when_server_reports_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let gw = Arc::new(StubGateway::default());
+        gw.push_ok("ord_fee");
+        let mut m = mgr(dir.path(), gw);
+        m.receive_intent(intent("sig_fee", 100.0)).unwrap();
+
+        let fill = m
+            .handle_order_update_fee(
+                "ord_fee",
+                None,
+                OrderState::Filled,
+                2.0,
+                101.0,
+                Some("2".into()),
+                None,
+                None,
+                Some(12.5),
+                time(),
+            )
+            .unwrap()
+            .expect("Filled 应产出成交");
+        assert_eq!(fill.fee, 12.5, "回报 fee 直通 FillEvent");
+        assert_eq!(fill.filled_size_raw.as_deref(), Some("2"));
+
+        // 旧服务端（无 fee）：兼容外壳逐字节旧行为——fee 0.0，不报错
+        let dir2 = tempfile::tempdir().unwrap();
+        let gw2 = Arc::new(StubGateway::default());
+        gw2.push_ok("ord_legacy");
+        let mut m2 = mgr(dir2.path(), gw2);
+        m2.receive_intent(intent("sig_legacy", 100.0)).unwrap();
+        let fill2 = m2
+            .handle_order_update(
+                "ord_legacy",
+                None,
+                OrderState::Filled,
+                2.0,
+                101.0,
+                None,
+                None,
+                None,
+                time(),
+            )
+            .unwrap()
+            .expect("兼容外壳同样产出成交");
+        assert_eq!(fill2.fee, 0.0, "无回传时保持旧兜底（错误不吞、数不造）");
     }
 
     #[test]
@@ -1915,6 +2008,7 @@ mod tests {
             exchange_order_id: None,
             filled_quantity_raw: None,
             place: None,
+            fee: None,
         });
         let mut m2 = mgr(dir.path(), gw2.clone());
         let fills = m2.execute_recovery(time()).unwrap();
@@ -2060,6 +2154,7 @@ mod tests {
             exchange_order_id: None,
             filled_quantity_raw: None,
             place: None,
+            fee: None,
         });
         let mut m2 = mgr(dir.path(), gw2);
         let fills = m2.execute_recovery(time()).unwrap();
@@ -2181,16 +2276,17 @@ mod tests {
         // 未到点不重试
         assert!(m2.due_retries(time()).is_empty());
 
-        // 终态审计行不再跨日盘载（裁剪语义：Rejected/Filled 无启动对账用途，
-        // 盘载时按 is_terminal 过滤）；重试中的 Failed 行是活动行，必须还原。
-        assert_eq!(m2.status_of("sig_bad"), None);
+        // 同日重启：当天终态（Rejected）属于当日快照的一部分，一并恢复；
+        // 跨日后由按日裁剪保证不复活（store terminal_pruning 集成测试锁死）。
+        // 重试中的 Failed 行是活动行，必须还原。
+        assert!(m2.status_of("sig_bad").is_some());
         let names: Vec<String> = m2
             .table
             .list()
             .iter()
             .map(|r| r.intent.id.clone())
             .collect();
-        assert!(!names.contains(&"sig_bad".to_string()));
+        assert!(names.contains(&"sig_bad".to_string()));
         assert!(names.contains(&"sig_retry".to_string()));
     }
 
@@ -2272,6 +2368,7 @@ mod tests {
                 stop_order_id: None,
                 created_event_time: time(),
                 status: SignalStatus::Created,
+                offset: None,
             },
             version: 1,
             status: SignalStatus::Failed,

@@ -54,53 +54,6 @@ impl std::str::FromStr for SignalType {
     }
 }
 
-/// 策略动作（Strategy::on_candle / on_realtime_tick 的返回值；由引擎翻译成信号）
-#[derive(Debug, Clone, PartialEq)]
-pub enum Action {
-    /// 开仓（price=触发价=主周期已闭合收盘价；stop_price=初始止损；atr=入场ATR）
-    Open {
-        side: Side,
-        price: f64,
-        stop_price: f64,
-        atr: f64,
-        strength: f64,
-        reason: String,
-    },
-    /// 平仓（price=平仓触发价）
-    Close {
-        price: f64,
-        reason: String,
-        is_stop_loss: bool,
-        strength: f64,
-    },
-    /// 反手 = 先平后开（平仓失败则放弃开仓，由 broker/引擎保证）
-    Reverse {
-        side: Side,
-        price: f64,
-        stop_price: f64,
-        atr: f64,
-        strength: f64,
-        close_reason: String,
-        is_stop_loss: bool,
-    },
-    /// 移动止损到新价位（SAR 跟踪止损等；只往有利方向由策略保证）
-    UpdateStop {
-        stop_price: f64,
-    },
-    /// 回写 SAR 触及制离场状态到持仓行（引擎直接更新 position，不产生订单）
-    UpdateExit {
-        exit_active: bool,
-        exit_price: f64,
-    },
-    Hold,
-}
-
-impl Action {
-    pub fn is_hold(&self) -> bool {
-        matches!(self, Action::Hold)
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Side {
@@ -125,13 +78,20 @@ pub struct Signal {
     pub direction: Option<Side>,
 }
 
-/// 生成确定性 signal_id — 与 Python `generate_signal_id` 逐字节一致
+/// 生成确定性 signal_id（Store `signal` 行键；与 Python `generate_signal_id`
+/// 同输入同输出）
 ///
-/// key = `{strategy_type.lower()}_{symbol.upper()}_{1m时间戳ms}_{signal_type.lower()}`
+/// key = `{strategy_type.lower()}_{venue_key.upper()}_{1m时间戳ms}_{signal_type.lower()}`
 /// ID = `sig_` + SHA256(key) 前 16 hex
+///
+/// **阶段 5c（v2.9，§13）调用方约定**：`venue_key` 位置喂命名空间键
+/// （`{exchange}/{market}/{symbol}`，`namespaced_key_of` 单一格式），不再喂
+/// 裸 symbol——跨交易所同名标的不再共享行键（§14-3 验收）。函数对任意
+/// 字符串的行为逐字节未动，故 Python 黄金值在函数级契约层面继续成立；
+/// 跨语言对齐要求 Python 侧按同一约定喂键（登记于 §13 迁移策略注记）。
 pub fn generate_signal_id(
     strategy_type: &str,
-    symbol: &str,
+    venue_key: &str,
     kline_timestamp: DateTime<Utc>,
     signal_type: SignalType,
 ) -> String {
@@ -139,7 +99,7 @@ pub fn generate_signal_id(
     let key = format!(
         "{}_{}_{}_{}",
         strategy_type.to_lowercase(),
-        symbol.to_uppercase(),
+        venue_key.to_uppercase(),
         ts_ms,
         signal_type.as_str()
     );
@@ -199,302 +159,56 @@ pub struct SignalIntent {
     pub created_event_time: DateTime<Utc>,
     /// 当前生命周期状态（初值 Created）
     pub status: SignalStatus,
-}
-
-/// Action → SignalIntent 转换上下文
-#[derive(Debug, Clone, Copy)]
-pub struct IntentCtx<'a> {
-    pub strategy_type: &'a str,
-    pub symbol: &'a str,
-    pub event_time: DateTime<Utc>,
-    /// 当前持仓 ID（平仓/反手时关联）
-    pub position_id: Option<&'a str>,
-    /// 当前持仓方向（决定平仓单方向；反手且无持仓时用新方向反向推导）
-    pub position_side: Option<Side>,
-    /// 当前持仓可平量（remaining_size 优先，与 apply_close_fill held 同口径）
-    pub position_size: Option<f64>,
-    /// 当前持仓可平量的原始字面量（开仓 FILLED 回报原样保存）
-    pub position_size_raw: Option<&'a str>,
-}
-
-impl<'a> IntentCtx<'a> {
-    pub fn new(strategy_type: &'a str, symbol: &'a str, event_time: DateTime<Utc>) -> Self {
-        Self {
-            strategy_type,
-            symbol,
-            event_time,
-            position_id: None,
-            position_side: None,
-            position_size: None,
-            position_size_raw: None,
-        }
-    }
-}
-
-fn opposite(side: Side) -> Side {
-    match side {
-        Side::Long => Side::Short,
-        Side::Short => Side::Long,
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn new_intent(
-    ctx: &IntentCtx<'_>,
-    kind: IntentKind,
-    direction: Side,
-    signal_type: SignalType,
-    price: f64,
-    stop_price: Option<f64>,
-    size: f64,
-    size_raw: Option<&str>,
-    link_position: bool,
-    stop_order_id: Option<&str>,
-) -> SignalIntent {
-    SignalIntent {
-        id: generate_signal_id(ctx.strategy_type, ctx.symbol, ctx.event_time, signal_type),
-        strategy_id: ctx.strategy_type.to_string(),
-        symbol: ctx.symbol.to_string(),
-        kind,
-        direction,
-        price,
-        size,
-        size_raw: size_raw.map(String::from),
-        stop_price,
-        position_id: link_position
-            .then(|| ctx.position_id.map(String::from))
-            .flatten(),
-        stop_order_id: stop_order_id.map(String::from),
-        created_event_time: ctx.event_time,
-        status: SignalStatus::Created,
-    }
-}
-
-/// 策略 Action → 0..=2 条交易意图（按管道顺序：平仓永远在开仓前）。
-///
-/// - [`Action::Hold`] / [`Action::UpdateStop`] / [`Action::UpdateExit`]：无下单
-///   意图（UpdateStop/UpdateExit 由引擎直接更新持仓行，不经过订单管道）
-/// - [`Action::Open`]：1 条
-/// - [`Action::Close`]：1 条（方向由持仓方向反向得出）
-/// - [`Action::Reverse`]：2 条（先平后开）
-pub fn intents_from_action(action: &Action, ctx: &IntentCtx<'_>) -> Vec<SignalIntent> {
-    match action {
-        Action::Hold | Action::UpdateStop { .. } | Action::UpdateExit { .. } => Vec::new(),
-        Action::Open {
-            side,
-            price,
-            stop_price,
-            ..
-        } => {
-            let st = match side {
-                Side::Long => SignalType::Buy,
-                Side::Short => SignalType::Sell,
-            };
-            vec![new_intent(
-                ctx,
-                IntentKind::Open,
-                *side,
-                st,
-                *price,
-                Some(*stop_price),
-                0.0,
-                None,
-                false,
-                None,
-            )]
-        }
-        Action::Close {
-            price, is_stop_loss, ..
-        } => {
-            let Some(held) = ctx.position_side else {
-                return Vec::new(); // 无持仓的平仓意图无意义
-            };
-            let st = match held {
-                Side::Long => SignalType::SellClose,
-                Side::Short => SignalType::BuyClose,
-            };
-            let stop_order_id = is_stop_loss
-                .then(|| ctx.position_id)
-                .flatten()
-                .map(|pid| format!("stop_{pid}_sl"));
-            vec![new_intent(
-                ctx,
-                IntentKind::Close,
-                opposite(held),
-                st,
-                *price,
-                None,
-                ctx.position_size.unwrap_or(0.0),
-                ctx.position_size_raw,
-                true,
-                stop_order_id.as_deref(),
-            )]
-        }
-        Action::Reverse {
-            side,
-            price,
-            stop_price,
-            is_stop_loss,
-            ..
-        } => {
-            // 先平：优先用实际持仓方向，无持仓信息时按新方向反向推导
-            let held = ctx.position_side.unwrap_or_else(|| opposite(*side));
-            let close_type = match held {
-                Side::Long => SignalType::SellClose,
-                Side::Short => SignalType::BuyClose,
-            };
-            let open_type = match side {
-                Side::Long => SignalType::Buy,
-                Side::Short => SignalType::Sell,
-            };
-            let stop_order_id = is_stop_loss
-                .then(|| ctx.position_id)
-                .flatten()
-                .map(|pid| format!("stop_{pid}_sl"));
-            vec![
-                new_intent(
-                    ctx,
-                    IntentKind::Reverse,
-                    opposite(held),
-                    close_type,
-                    *price,
-                    None,
-                    ctx.position_size.unwrap_or(0.0),
-                    ctx.position_size_raw,
-                    true,
-                    stop_order_id.as_deref(),
-                ),
-                new_intent(
-                    ctx,
-                    IntentKind::Reverse,
-                    *side,
-                    open_type,
-                    *price,
-                    Some(*stop_price),
-                    0.0,
-                    None,
-                    false,
-                    None,
-                ),
-            ]
-        }
-    }
+    /// 开平偏移（阶段 4 v2.7，§13-4「实盘订单帧带平今/平昨」）：
+    /// `"open" | "close" | "close_today" | "close_yesterday"`。
+    /// **过渡口径（§13 v2 迁移策略）**：字符串形态、serde default，
+    /// 信号意图默认 None——服务端维持既有隐式开平
+    /// 判定，行为零回归；SPI live 桥（`exchanges::live`）由
+    /// `OrderRequest.offset` 填入，`trading_service` 出帧带 `offset` 字段。
+    /// 阶段 5 与 exchange/market 一起类型化（全链路 `InstrumentId`）。
+    #[serde(default)]
+    pub offset: Option<String>,
 }
 
 #[cfg(test)]
-mod intent_tests {
+mod id_namespace_tests {
     use super::*;
     use chrono::TimeZone;
 
-    fn ctx() -> IntentCtx<'static> {
-        // IntentCtx 只借用 &'static str，时间为 Copy
-        IntentCtx {
-            strategy_type: "sar_snt3",
-            symbol: "BTCUSDT",
-            event_time: Utc.with_ymd_and_hms(2026, 6, 10, 0, 0, 0).unwrap(),
-            position_id: None,
-            position_side: None,
-            position_size: None,
-            position_size_raw: None,
-        }
-    }
-
+    /// §14-3 行键命名空间（阶段 5c v2.9）：同一裸 symbol、同策略、同 K 线
+    /// 时刻，跨交易所必须得到不同行键；各自确定性不变（幂等键）；且不得
+    /// 等于迁移前裸 symbol 哈希——旧格式行与新行在共享表零碰撞。
     #[test]
-    fn hold_and_update_stop_produce_no_intents() {
-        let c = ctx();
-        assert!(intents_from_action(&Action::Hold, &c).is_empty());
-        assert!(intents_from_action(&Action::UpdateStop { stop_price: 99.0 }, &c).is_empty());
-    }
-
-    #[test]
-    fn update_exit_produces_no_intents() {
-        // exit 状态是持仓子状态，由引擎直接回写 position 行，不产生订单意图
-        let c = ctx();
-        assert!(intents_from_action(
-            &Action::UpdateExit {
-                exit_active: true,
-                exit_price: 99.0
-            },
-            &c
-        )
-        .is_empty());
-    }
-
-    #[test]
-    fn open_long_intent_uses_buy_id_and_carries_stop() {
-        let c = ctx();
-        let action = Action::Open {
-            side: Side::Long,
-            price: 100.0,
-            stop_price: 98.0,
-            atr: 1.0,
-            strength: 0.8,
-            reason: "r".into(),
-        };
-        let intents = intents_from_action(&action, &c);
-        assert_eq!(intents.len(), 1);
-        let i = &intents[0];
-        assert_eq!(i.kind, IntentKind::Open);
-        assert_eq!(i.direction, Side::Long);
-        assert_eq!(i.stop_price, Some(98.0));
-        assert_eq!(i.status, SignalStatus::Created);
-        assert_eq!(
-            i.id,
-            generate_signal_id("sar_snt3", "BTCUSDT", c.event_time, SignalType::Buy)
+    fn venue_key_namespaces_signal_id_across_exchanges() {
+        let ts = Utc.with_ymd_and_hms(2026, 6, 10, 0, 0, 0).unwrap();
+        let a = generate_signal_id(
+            "sar_snt3",
+            "binance/crypto_perpetual/BTCUSDT",
+            ts,
+            SignalType::Buy,
         );
-    }
-
-    #[test]
-    fn close_long_sells_and_links_position() {
-        let mut c = ctx();
-        c.position_side = Some(Side::Long);
-        c.position_id = Some("sig_open");
-        let action = Action::Close {
-            price: 110.0,
-            reason: "tp".into(),
-            is_stop_loss: false,
-            strength: 1.0,
-        };
-        let intents = intents_from_action(&action, &c);
-        assert_eq!(intents.len(), 1);
-        assert_eq!(intents[0].direction, Side::Short);
-        assert_eq!(intents[0].kind, IntentKind::Close);
-        assert_eq!(intents[0].position_id.as_deref(), Some("sig_open"));
-    }
-
-    #[test]
-    fn close_without_position_is_dropped() {
-        let c = ctx();
-        let action = Action::Close {
-            price: 110.0,
-            reason: "tp".into(),
-            is_stop_loss: false,
-            strength: 1.0,
-        };
-        assert!(intents_from_action(&action, &c).is_empty());
-    }
-
-    #[test]
-    fn reverse_is_close_then_open() {
-        let mut c = ctx();
-        c.position_side = Some(Side::Long);
-        c.position_id = Some("sig_open");
-        let action = Action::Reverse {
-            side: Side::Short,
-            price: 105.0,
-            stop_price: 107.0,
-            atr: 1.0,
-            strength: 0.9,
-            close_reason: "flip".into(),
-            is_stop_loss: false,
-        };
-        let intents = intents_from_action(&action, &c);
-        assert_eq!(intents.len(), 2);
-        assert_eq!(intents[0].direction, Side::Short, "先平多");
-        assert_eq!(intents[0].position_id.as_deref(), Some("sig_open"));
-        assert_eq!(intents[1].direction, Side::Short, "再开空");
-        assert_eq!(intents[1].stop_price, Some(107.0));
-        assert_ne!(intents[0].id, intents[1].id, "平/开信号 ID 不同");
+        let b = generate_signal_id(
+            "sar_snt3",
+            "bybit/crypto_perpetual/BTCUSDT",
+            ts,
+            SignalType::Buy,
+        );
+        assert_ne!(a, b, "跨交易所同名 symbol 不得共享行键");
+        assert_eq!(
+            a,
+            generate_signal_id(
+                "sar_snt3",
+                "binance/crypto_perpetual/BTCUSDT",
+                ts,
+                SignalType::Buy
+            ),
+            "确定性（幂等重提）未破坏"
+        );
+        assert_ne!(
+            a,
+            generate_signal_id("sar_snt3", "BTCUSDT", ts, SignalType::Buy),
+            "回归钉：新口径不得复现迁移前的裸 symbol 行键"
+        );
     }
 }
 

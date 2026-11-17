@@ -6,8 +6,8 @@
 //! ```text
 //! pub mod sar_snt3;
 //! pub mod my_strat;
-//! fn generated_factories() -> &'static [StrategyEntry] {
-//!     &[ sar_snt3::__strategy_entry(), my_strat::__strategy_entry(), ... ]
+//! fn generated_factories() -> Vec<StrategyEntry> {
+//!     vec![ sar_snt3::__strategy_entry(), my_strat::__strategy_entry(), ... ]
 //! }
 //! ```
 //!
