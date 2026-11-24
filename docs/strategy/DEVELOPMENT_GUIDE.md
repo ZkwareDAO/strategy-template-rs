@@ -26,7 +26,7 @@ pub trait CrossSectionalStrategyPort: Send {
 
 - 推荐用 `crates/strategies/src/common/mod.rs` 的 `StrategyBase` + `StrategyLogic`，
   只写 `name/top_k/score/entry_allowed/stop` 五个钩子。
-- 或直接实现 port，参考 `xsec_template.rs` / `xsec_momentum.rs`。
+- 或直接实现 port，参考 `template_xsec.rs` / `template_xsec.rs`。
 
 - `newly_closed`：本轮新闭合的周期，只会是 `timeframes()` 声明过的值。
 - `snapshots`：每个标的的 bar、仓位、特征、配置规则结果、已闭合序列。
@@ -149,7 +149,7 @@ crate::register_strategy! {
 ## 7. 测试写法
 
 直接构造 `InstrumentSnapshot` / `PortfolioContext` 喂合成已闭合 K 线
-（见 `xsec_template.rs`、`example_dual_ma.rs` 的 `mod tests`）。`PortfolioContext`
+（见 `template_xsec.rs`、`template_trend.rs` 的 `mod tests`）。`PortfolioContext`
 至少显式给出 `master`、`multipliers`、`max_total_notional`、`rebalance_due`。
 至少覆盖：入场、出场、数据不足、方向冲突、`stale`、缺失特征、风险预算目标数量。
 `StrategyBase` 的通用行为由 `crates/strategies/tests/strategy_base.rs` 统一覆盖，

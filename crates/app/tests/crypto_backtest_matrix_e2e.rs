@@ -1,7 +1,6 @@
 //! crypto 样例配置族的 CLI 回测矩阵：每个 `config/<group>/strategy.yaml` 真跑一遍。
 //!
-//! 覆盖 `example_dual_ma` / `example_mtf_trend` / `xsec_momentum` / `xsec_template`
-//! （N=2）/ `xsec_template_single`（N=1）在统一端口下的完整装配、聚合、决策与报告链路。
+//! 覆盖 `tpl_trend_crypto`（单标）与 `tpl_xsec_crypto`（N=2）在统一端口下的完整装配、聚合、决策与报告链路。
 //! 只断言运行成功与统一产物落盘，不断言收益（合成行情不追求 alpha）。
 
 use std::path::{Path, PathBuf};
@@ -83,11 +82,8 @@ fn find_file(root: &Path, name: &str) -> Option<PathBuf> {
 #[test]
 fn crypto_sample_configs_run_cli_backtest_end_to_end() {
     for group in [
-        "example_dual_ma",
-        "example_mtf_trend",
-        "xsec_momentum",
-        "xsec_template",
-        "xsec_template_single",
+        "tpl_trend_crypto",
+        "tpl_xsec_crypto",
     ] {
         let tmp = tempfile::tempdir().unwrap();
         let cfg = stage_config(tmp.path(), group);

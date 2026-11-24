@@ -94,7 +94,7 @@
 | crate          | 职责                                                               |
 | -------------- | ---------------------------------------------------------------- |
 | **app**        | 回测引擎 Engine（旧链路）+ SpiBacktest（SPI 新链路）、CLI、配置解析、报告生成             |
-| **strategies** | 策略插件 crate：build.rs 自动扫描注册，含 example_dual_ma 和 example_mtf_trend |
+| **strategies** | 策略插件 crate：build.rs 自动扫描注册，含 template_trend 和 template_trend |
 
 ### 依赖方向铁律
 

@@ -60,7 +60,7 @@ fn candle(t: chrono::DateTime<Utc>, close: f64) -> Candle {
 
 fn symbol_spec(symbol: &str) -> SymbolSpec {
     SymbolSpec {
-        strategy: "xsec_momentum".into(),
+        strategy: "template_xsec".into(),
         symbol: symbol.into(),
         timeframe: "1m".into(),
         cash: 200.0,
@@ -85,8 +85,8 @@ fn symbol_spec(symbol: &str) -> SymbolSpec {
 
 fn strategy_cfg() -> StrategyConfig {
     StrategyConfig {
-        strategy_type: "xsec_momentum".into(),
-        strategy_id: Some("xsec_momentum:default".into()),
+        strategy_type: "template_xsec".into(),
+        strategy_id: Some("template_xsec:default".into()),
         mode: StrategyMode::CrossSectional,
         merge_positions: true,
         universe: vec![
@@ -168,8 +168,8 @@ async fn strategy_actor_paper_two_symbols_processes_queued_candles() {
     });
 
     let spec = StrategyLiveSpec {
-        strategy_id: "xsec_momentum:default".into(),
-        strategy_type: "xsec_momentum".into(),
+        strategy_id: "template_xsec:default".into(),
+        strategy_type: "template_xsec".into(),
         config: strategy_cfg(),
         instruments: vec![symbol_spec("BTCUSDT"), symbol_spec("ETHUSDT")],
         mode: "paper_trading".into(),
@@ -362,8 +362,8 @@ fn spawn_harness_stub(
             })
         }));
     let spec = StrategyLiveSpec {
-        strategy_id: "xsec_momentum:default".into(),
-        strategy_type: "xsec_momentum".into(),
+        strategy_id: "template_xsec:default".into(),
+        strategy_type: "template_xsec".into(),
         config: strategy_cfg(),
         instruments: vec![symbol_spec("BTCUSDT")],
         mode: "live".into(),
@@ -579,7 +579,7 @@ async fn restart_reconciles_inflight_before_consuming_candles() {
     // 预置：Store 行 Active qty=1（上一代遗留），镜像账本（远程）为空。
     store.table::<SubPosition>().upsert(SubPosition {
         id: "sub_restart".into(),
-        strategy_id: "xsec_momentum:default".into(),
+        strategy_id: "template_xsec:default".into(),
         master_id: "master_000001".into(),
         instrument: inst.clone(),
         side: Side::Long,
@@ -613,8 +613,8 @@ async fn restart_reconciles_inflight_before_consuming_candles() {
             })
         }));
     let spec = StrategyLiveSpec {
-        strategy_id: "xsec_momentum:default".into(),
-        strategy_type: "xsec_momentum".into(),
+        strategy_id: "template_xsec:default".into(),
+        strategy_type: "template_xsec".into(),
         config: strategy_cfg(),
         instruments: vec![symbol_spec("BTCUSDT")],
         mode: "live".into(),
@@ -797,7 +797,7 @@ fn drill_kline_channels(
     for s in &symbols {
         routes.insert(
             s.clone(),
-            ("xsec_momentum".to_string(), "binance".to_string()),
+            ("template_xsec".to_string(), "binance".to_string()),
         );
     }
     let kline: Arc<dyn KlineClient> = TradingServiceKlineClient::start(
@@ -849,8 +849,8 @@ fn drill_spec(state_dir: std::path::PathBuf) -> StrategyLiveSpec {
 /// 需要与默认演练配置不同的 `portfolio_exit`。
 fn drill_spec_cfg(state_dir: std::path::PathBuf, config: StrategyConfig) -> StrategyLiveSpec {
     StrategyLiveSpec {
-        strategy_id: "xsec_momentum:default".into(),
-        strategy_type: "xsec_momentum".into(),
+        strategy_id: "template_xsec:default".into(),
+        strategy_type: "template_xsec".into(),
         config,
         instruments: vec![symbol_spec("BTCUSDT"), symbol_spec("ETHUSDT")],
         mode: "live".into(),
@@ -889,7 +889,7 @@ fn spawn_drill_actor(
         Some(Box::new(move || -> Box<dyn AsyncOrderGateway> {
             Box::new(TradingGateway::with_submit(
                 Arc::clone(&trading_f),
-                "xsec_momentum".into(),
+                "template_xsec".into(),
                 venue.clone(),
                 true,
             ))
@@ -907,7 +907,7 @@ fn spawn_drill_actor(
     drop(bind_tx);
     let router_handle = handle.clone();
     let forwarder = tokio::spawn(async move {
-        let mut router = OrderRouter::new(vec![("xsec_momentum".to_string(), true, router_handle)]);
+        let mut router = OrderRouter::new(vec![("template_xsec".to_string(), true, router_handle)]);
         loop {
             tokio::select! {
                 maybe = events.recv() => {
@@ -970,7 +970,7 @@ async fn strategy_live_drill_two_symbols_full_loop() {
     // 与 bootstrap 同款：一帧订阅全 universe（mock 支持 symbols 数组）。
     drill
         .trading
-        .subscribe_klines("xsec_momentum", "binance", &symbols)
+        .subscribe_klines("template_xsec", "binance", &symbols)
         .await
         .expect("mock 订阅帧必须被受理");
     let (_kline, candle_rxs) = drill_kline_channels(&drill.kdir, Arc::clone(&drill.trading));
@@ -1051,7 +1051,7 @@ async fn strategy_live_drill_restart_recover() {
         let symbols = drill_symbols();
         drill
             .trading
-            .subscribe_klines("xsec_momentum", "binance", &symbols)
+            .subscribe_klines("template_xsec", "binance", &symbols)
             .await
             .unwrap();
         let (_k, rxs) = drill_kline_channels(&drill.kdir, Arc::clone(&drill.trading));
@@ -1088,7 +1088,7 @@ async fn strategy_live_drill_restart_recover() {
     let (trading2, events2) = drill.new_client();
     let symbols = drill_symbols();
     trading2
-        .subscribe_klines("xsec_momentum", "binance", &symbols)
+        .subscribe_klines("template_xsec", "binance", &symbols)
         .await
         .unwrap();
     let (_k2, rxs2) = drill_kline_channels(&drill.kdir, Arc::clone(&trading2));
@@ -1159,8 +1159,8 @@ impl CrossSectionalStrategyPort for OpenThenPanicStrategy {
 
 fn t8_spec(state_dir: std::path::PathBuf, instruments: Vec<SymbolSpec>) -> StrategyLiveSpec {
     StrategyLiveSpec {
-        strategy_id: "xsec_momentum:default".into(),
-        strategy_type: "xsec_momentum".into(),
+        strategy_id: "template_xsec:default".into(),
+        strategy_type: "template_xsec".into(),
         config: strategy_cfg(),
         instruments,
         mode: "live".into(),
@@ -1450,7 +1450,7 @@ fn multi_group_paper_spec(id: &str, symbols: &[&str]) -> StrategySpec {
         .map(|s| UniverseEntry::Symbol((*s).to_string()))
         .collect();
     StrategySpec {
-        strategy_type: "xsec_momentum".into(),
+        strategy_type: "template_xsec".into(),
         strategy_id: id.into(),
         config,
         instruments: symbols.iter().map(|s| symbol_spec(s)).collect(),
@@ -1546,7 +1546,7 @@ fn spawn_multi_group_actors(
             Some(Box::new(move || -> Box<dyn AsyncOrderGateway> {
                 Box::new(TradingGateway::with_submit(
                     Arc::clone(&trading_f),
-                    "xsec_momentum".into(),
+                    "template_xsec".into(),
                     venue.clone(),
                     true,
                 ))
@@ -1567,7 +1567,7 @@ fn spawn_multi_group_actors(
     drop(bind_tx);
     let routes: Vec<(String, bool, RuntimeHandle)> = handles
         .iter()
-        .map(|h| ("xsec_momentum".to_string(), true, h.clone()))
+        .map(|h| ("template_xsec".to_string(), true, h.clone()))
         .collect();
     let forwarder = tokio::spawn(async move {
         let mut router = OrderRouter::new(routes);
@@ -1609,7 +1609,7 @@ async fn multi_group_live_shared_store_keeps_scopes_isolated() {
     let symbols = drill_symbols();
     drill
         .trading
-        .subscribe_klines("xsec_momentum", "binance", &symbols)
+        .subscribe_klines("template_xsec", "binance", &symbols)
         .await
         .expect("mock 订阅帧必须被受理");
     let (_kline, candle_rxs) = drill_kline_channels(&drill.kdir, Arc::clone(&drill.trading));
@@ -1946,7 +1946,7 @@ async fn full_chain_open_hold_close_and_persist() {
     let symbols = drill_symbols();
     drill
         .trading
-        .subscribe_klines("xsec_momentum", "binance", &symbols)
+        .subscribe_klines("template_xsec", "binance", &symbols)
         .await
         .expect("mock 订阅帧必须被受理");
     // 手动喂 bar：mock 回放节拍不可控，「开→平」两轮可能在首个等待窗口内
@@ -2052,7 +2052,7 @@ async fn full_chain_restart_same_day_and_cross_day() {
     let symbols = drill_symbols();
     drill
         .trading
-        .subscribe_klines("xsec_momentum", "binance", &symbols)
+        .subscribe_klines("template_xsec", "binance", &symbols)
         .await
         .expect("mock 订阅帧必须被受理");
     // 手动喂 bar：固定「双开 → 平 ETH」两轮事件顺序（K 线接入由其余 drill 用例覆盖）。
@@ -2282,7 +2282,7 @@ async fn spawn_full_chain_with_fills(
     let symbols = drill_symbols();
     drill
         .trading
-        .subscribe_klines("xsec_momentum", "binance", &symbols)
+        .subscribe_klines("template_xsec", "binance", &symbols)
         .await
         .expect("mock 订阅帧必须被受理");
     let (btc_tx, btc_rx) = std::sync::mpsc::channel();
@@ -3152,7 +3152,7 @@ async fn live_clock_rollover_keeps_active_position_in_new_day_dir() {
     let symbols = drill_symbols();
     drill
         .trading
-        .subscribe_klines("xsec_momentum", "binance", &symbols)
+        .subscribe_klines("template_xsec", "binance", &symbols)
         .await
         .expect("mock 订阅帧必须被受理");
     let (btc_tx, btc_rx) = std::sync::mpsc::channel();
@@ -3224,7 +3224,7 @@ async fn venue_contract_submit_query_positions_roundtrip() {
     };
     let intent = SignalIntent {
         id: "venue_contract_open_1".into(),
-        strategy_id: "xsec_momentum".into(),
+        strategy_id: "template_xsec".into(),
         symbol: "BTCUSDT".into(),
         kind: IntentKind::Open,
         direction: Side::Long,
@@ -3240,7 +3240,7 @@ async fn venue_contract_submit_query_positions_roundtrip() {
     };
     let order_id = drill
         .trading
-        .submit_order("xsec_momentum", &venue, &intent)
+        .submit_order("template_xsec", &venue, &intent)
         .await
         .expect("mock venue 必须受理开仓");
     assert!(!order_id.is_empty(), "venue 必须返回非空订单号");
@@ -3249,7 +3249,7 @@ async fn venue_contract_submit_query_positions_roundtrip() {
     for _ in 0..200 {
         match drill
             .trading
-            .get_order("xsec_momentum", &venue, &intent.id)
+            .get_order("template_xsec", &venue, &intent.id)
             .await
         {
             Ok(snap) if snap.state == CoreOrderState::Filled => {
@@ -3270,7 +3270,7 @@ async fn venue_contract_submit_query_positions_roundtrip() {
     for side in ["long", "short"] {
         let rows = drill
             .trading
-            .get_positions("xsec_momentum", &venue, "BTCUSDT", side)
+            .get_positions("template_xsec", &venue, "BTCUSDT", side)
             .await
             .expect("仓位查询必须成功");
         remote_qty += rows

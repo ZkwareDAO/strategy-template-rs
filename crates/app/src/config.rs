@@ -331,7 +331,7 @@ pub struct SymbolSpec {
 pub struct Defaults;
 
 impl Defaults {
-    pub const STRATEGY: &'static str = "example_dual_ma";
+    pub const STRATEGY: &'static str = "template_trend";
     pub const TIMEFRAME: &'static str = "8h";
     pub const CASH: f64 = 200.0;
     pub const LEVERAGE: u32 = 1;
@@ -1540,7 +1540,7 @@ mod tests {
     fn empty_config_pure_cli_defaults() {
         let f = FileConfig::default();
         let spec = resolve_backtest(&f, Some("btcusdt"), None, None, None).unwrap();
-        assert_eq!(spec.strategy, "example_dual_ma");
+        assert_eq!(spec.strategy, "template_trend");
         assert_eq!(spec.timeframe, "8h");
         assert_eq!(spec.cash, 200.0);
         assert_eq!(spec.symbol, "BTCUSDT");
@@ -1660,12 +1660,12 @@ example_strategy_v3:
         let spec = resolve_backtest(
             &f,
             Some("BTCUSDT"),
-            Some("example_dual_ma"),
+            Some("template_trend"),
             Some("8h"),
             Some(99.0),
         )
         .unwrap();
-        assert_eq!(spec.strategy, "example_dual_ma");
+        assert_eq!(spec.strategy, "template_trend");
         assert_eq!(spec.timeframe, "8h");
         assert_eq!(spec.cash, 99.0);
     }
@@ -1682,7 +1682,7 @@ symbols:
         let spec = resolve_backtest(&f, None, None, None, None).unwrap();
         assert_eq!(spec.symbol, "ETHUSDT");
         assert_eq!(spec.timeframe, "4h");
-        assert_eq!(spec.strategy, "example_dual_ma"); // 默认
+        assert_eq!(spec.strategy, "template_trend"); // 默认
     }
 
     #[test]
@@ -1783,8 +1783,8 @@ symbols:
     strategy: b
 "#,
         );
-        let specs = resolve_run(&f, &[], Some("example_dual_ma"), None, None, None).unwrap();
-        assert_eq!(specs[0].strategy, "example_dual_ma"); // CLI 显式最高
+        let specs = resolve_run(&f, &[], Some("template_trend"), None, None, None).unwrap();
+        assert_eq!(specs[0].strategy, "template_trend"); // CLI 显式最高
     }
 
     #[test]
@@ -2630,18 +2630,18 @@ services:
         let tmp = tempfile::tempdir().unwrap();
         let dir = make_dir_cfg(
             tmp.path(),
-            "example_dual_ma",
+            "template_trend",
             &[
                 // 字母序在前：期货（SHFE）
                 (
                     "CU.yaml",
-                    "strategy: example_dual_ma\ntimeframe: 1h\nexchange: SHFE\naccount: ctp_acct\n"
+                    "strategy: template_trend\ntimeframe: 1h\nexchange: SHFE\naccount: ctp_acct\n"
                         .into(),
                 ),
                 // 字母序在后：现货（binance），即被污染的那一份
                 (
                     "BTCUSDT.yaml",
-                    "strategy: example_dual_ma\ntimeframe: 4h\nexchange: binance\naccount: spot_acct\n"
+                    "strategy: template_trend\ntimeframe: 4h\nexchange: binance\naccount: spot_acct\n"
                         .into(),
                 ),
             ],
@@ -2670,7 +2670,7 @@ services:
         let tmp = tempfile::tempdir().unwrap();
         let dir = make_dir_cfg(
             tmp.path(),
-            "example_dual_ma",
+            "template_trend",
             &[
                 ("CU.yaml", "strategy: s\nexchange: SHFE\n".into()),
                 ("BTCUSDT.yaml", "strategy: s\nexchange: binance\n".into()),
@@ -2702,7 +2702,7 @@ services:
         let tmp = tempfile::tempdir().unwrap();
         let dir = make_dir_cfg(
             tmp.path(),
-            "example_dual_ma",
+            "template_trend",
             &[(
                 "template.yaml",
                 "symbol: BTCUSDT\nstrategy: s\nexchange: binance\n".into(),
@@ -3021,7 +3021,7 @@ services:
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         std::env::remove_var(STRATEGY_SECRET_ENV);
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../config/example_dual_ma_cu/strategy.yaml");
+            .join("../../config/tpl_trend_futures/strategy.yaml");
         let spec = crate::strategy_config::load_strategy(&path).expect("期货示例配置应可解析");
         assert_eq!(spec.instruments.len(), 1);
         assert_eq!(spec.instruments[0].symbol, "CU");
@@ -3150,7 +3150,7 @@ mod venue_qty_spec_tests {
         // 实盘数量口径必须与场所规格一致：解析 exchanges.specs 的 per-symbol
         // qty 步长，供执行端口 normalize，避免低于步长的差额发单被拒。
         let file = parse_config(
-            "exchanges:\n  binance:\n    symbols: [BTCUSDT]\n    specs:\n      BTCUSDT: {qty_step: 0.001, min_qty: 0.001, qty_precision: 3}\nsymbols:\n  - symbol: BTCUSDT\nstrategy: xsec_momentum\ntimeframe: 1m\ncash: 200\nmode: live\n",
+            "exchanges:\n  binance:\n    symbols: [BTCUSDT]\n    specs:\n      BTCUSDT: {qty_step: 0.001, min_qty: 0.001, qty_precision: 3}\nsymbols:\n  - symbol: BTCUSDT\nstrategy: template_xsec\ntimeframe: 1m\ncash: 200\nmode: live\n",
         )
         .unwrap();
         let specs = resolve_run(&file, &[], None, None, None, None).unwrap();

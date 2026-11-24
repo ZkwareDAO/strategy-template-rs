@@ -22,7 +22,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use strategy_store::{Model, ModelTable, Store};
@@ -191,10 +191,36 @@ impl EquitySink {
 
     /// 记录一根 1m 收盘时刻的权益（同桶幂等刷新）。
     /// `tf_minutes`: 信号周期分钟数（桶按分钟数对齐）。
+    /// 无交易日信息的调用方（crypto / 旧链路）走 UTC 自然日。
     pub fn on_1m_close(&self, t: DateTime<Utc>, equity: f64, cash: f64, tf_minutes: u32) {
+        self.on_1m_close_with_trading_day(t, equity, cash, tf_minutes, None);
+    }
+
+    /// 同上，日线桶按交易所交易日标注（期货夜盘归次日交易日）。
+    ///
+    /// `trading_day` 来自 `BarExtensions::trading_day`（聚合层写入）：期货
+    /// 夜盘 21:00 归下一交易日，crypto 为 UTC 自然日。日线 id/label 与
+    /// `bucket_secs` 均以交易日为准，保证与导出 CSV 的 `trading_day` 列对齐。
+    pub fn on_1m_close_with_trading_day(
+        &self,
+        t: DateTime<Utc>,
+        equity: f64,
+        cash: f64,
+        tf_minutes: u32,
+        trading_day: Option<NaiveDate>,
+    ) {
         let name = self.strategy_name.as_ref();
-        let date = t.format("%Y-%m-%d").to_string();
-        let day_bucket = t.timestamp() / 86_400 * 86_400;
+        let date = trading_day
+            .map(|d| d.format("%Y-%m-%d").to_string())
+            .unwrap_or_else(|| t.format("%Y-%m-%d").to_string());
+        let day_bucket = trading_day
+            .map(|d| {
+                d.and_hms_opt(0, 0, 0)
+                    .expect("交易日午夜合法")
+                    .and_utc()
+                    .timestamp()
+            })
+            .unwrap_or_else(|| t.timestamp() / 86_400 * 86_400);
         self.table.upsert(EquityPoint {
             id: daily_equity_id(name, &date),
             strategy_name: name.into(),
@@ -1246,6 +1272,22 @@ mod tests {
         let got = table.get("trade_sig_1").unwrap();
         assert_eq!(got.trade_id, "T00000001");
         assert_eq!(got.comment, "open");
+    }
+
+    /// 交易日标注：夜盘（周五 21:00 北京）与次日日盘落同一 daily 行，
+    /// label 用交易日而非 UTC 自然日。
+    #[test]
+    fn daily_equity_uses_trading_day_label() {
+        let (_dir, _store, sink) = sink_at(0);
+        let night = Utc.with_ymd_and_hms(2026, 1, 2, 13, 0, 0).unwrap(); // 周五 21:00 北京
+        let morning = Utc.with_ymd_and_hms(2026, 1, 5, 1, 0, 0).unwrap(); // 周一 09:00 北京
+        let td = NaiveDate::from_ymd_opt(2026, 1, 5).unwrap();
+        sink.on_1m_close_with_trading_day(night, 100.0, 100.0, 60, Some(td));
+        sink.on_1m_close_with_trading_day(morning, 101.0, 101.0, 60, Some(td));
+        let daily = sink.daily();
+        assert_eq!(daily.len(), 1, "夜盘与日盘同属一个交易日");
+        assert_eq!(daily[0].label, "2026-01-05");
+        assert_eq!(daily[0].equity, 101.0);
     }
 
     /// 确定性红线：同序列 K 线时间喂两遍（各自独立 Store），

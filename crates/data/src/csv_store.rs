@@ -10,12 +10,16 @@
 //! active_buy_volume,active_buy_quote_volume
 //! timestamp：UTC，格式 `2025-12-24 00:00:00+00:00`（pandas 兼容）；
 //! 桶时间语义 = open_time（左闭区间起点）。读取兼容旧 6 列文件（扩展列缺省 0）。
+//!
+//! 可选第 11 列 `trading_day`（`YYYY-MM-DD`）：交易所交易日（期货夜盘归次日、
+//! crypto 为 UTC 自然日），在大周期 K 线导出时写入；旧文件/旧调用方
+//! 无此列时读取为 None，10 列格式继续保持兼容。
 
 use std::fs::{self, OpenOptions};
 use std::io::{self, BufWriter};
 use std::path::{Path, PathBuf};
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDate, Utc};
 use tracing::{debug, trace};
 
 use strategy_core::candle::{Candle, Timeframe};
@@ -98,8 +102,11 @@ pub fn parse_ts(s: &str) -> Option<DateTime<Utc>> {
         .map(|t| t.with_timezone(&Utc))
 }
 
-/// 读取 K 线 CSV；返回升序 Candle 列表（is_closed 一律 true —— CSV 里的都是历史已闭合）
-pub fn load_csv(path: impl AsRef<Path>) -> io::Result<Vec<Candle>> {
+/// 读取 K 线 CSV（含可选 `trading_day` 列）；返回升序 `(Candle, 交易日)`。
+/// 无该列或该行为空时为 None（旧 10 列文件 / crypto）。
+pub fn load_csv_annotated(
+    path: impl AsRef<Path>,
+) -> io::Result<Vec<(Candle, Option<NaiveDate>)>> {
     let path = path.as_ref();
     if !path.exists() {
         return Ok(Vec::new());
@@ -131,6 +138,7 @@ pub fn load_csv(path: impl AsRef<Path>) -> io::Result<Vec<Candle>> {
     let i_tn = idx("trade_num");
     let i_abv = idx("active_buy_volume");
     let i_abqv = idx("active_buy_quote_volume");
+    let i_td = idx("trading_day");
     let num = |rec: &csv::StringRecord, i: Option<usize>| {
         i.and_then(|i| rec.get(i))
             .and_then(|v| v.parse().ok())
@@ -143,22 +151,37 @@ pub fn load_csv(path: impl AsRef<Path>) -> io::Result<Vec<Candle>> {
         let ts = parse_ts(rec.get(i_ts).unwrap_or_default()).ok_or_else(|| {
             io::Error::other(format!("非法时间戳: {}", rec.get(i_ts).unwrap_or("")))
         })?;
-        out.push(Candle {
-            open_time: ts,
-            open: rec.get(i_o).and_then(|v| v.parse().ok()).unwrap_or(0.0),
-            high: rec.get(i_h).and_then(|v| v.parse().ok()).unwrap_or(0.0),
-            low: rec.get(i_l).and_then(|v| v.parse().ok()).unwrap_or(0.0),
-            close: rec.get(i_c).and_then(|v| v.parse().ok()).unwrap_or(0.0),
-            volume: rec.get(i_v).and_then(|v| v.parse().ok()).unwrap_or(0.0),
-            quote_volume: num(&rec, i_qv),
-            trade_num: num(&rec, i_tn) as u64,
-            active_buy_volume: num(&rec, i_abv),
-            active_buy_quote_volume: num(&rec, i_abqv),
-            is_closed: true,
-        });
+        let trading_day = i_td
+            .and_then(|i| rec.get(i))
+            .filter(|s| !s.is_empty())
+            .and_then(|s| NaiveDate::parse_from_str(s, "%Y-%m-%d").ok());
+        out.push((
+            Candle {
+                open_time: ts,
+                open: rec.get(i_o).and_then(|v| v.parse().ok()).unwrap_or(0.0),
+                high: rec.get(i_h).and_then(|v| v.parse().ok()).unwrap_or(0.0),
+                low: rec.get(i_l).and_then(|v| v.parse().ok()).unwrap_or(0.0),
+                close: rec.get(i_c).and_then(|v| v.parse().ok()).unwrap_or(0.0),
+                volume: rec.get(i_v).and_then(|v| v.parse().ok()).unwrap_or(0.0),
+                quote_volume: num(&rec, i_qv),
+                trade_num: num(&rec, i_tn) as u64,
+                active_buy_volume: num(&rec, i_abv),
+                active_buy_quote_volume: num(&rec, i_abqv),
+                is_closed: true,
+            },
+            trading_day,
+        ));
     }
-    out.sort_by_key(|c| c.open_time);
+    out.sort_by_key(|(c, _)| c.open_time);
     Ok(out)
+}
+
+/// 读取 K 线 CSV；返回升序 Candle 列表（is_closed 一律 true —— CSV 里的都是历史已闭合）
+pub fn load_csv(path: impl AsRef<Path>) -> io::Result<Vec<Candle>> {
+    Ok(load_csv_annotated(path)?
+        .into_iter()
+        .map(|(c, _)| c)
+        .collect())
 }
 
 /// 整体重写 K 线 CSV（按 open_time 升序；临时文件 + rename 防半写）
@@ -173,6 +196,48 @@ pub fn save_csv(path: impl AsRef<Path>, candles: &[Candle]) -> io::Result<()> {
         wtr.write_record(HEADER)?;
         for c in candles {
             wtr.write_record(record_of(c))?;
+        }
+        wtr.flush()?;
+        wtr.into_inner().map_err(io::Error::other)?;
+    }
+    fs::rename(&tmp, path)?;
+    Ok(())
+}
+
+/// 写出带交易日标注的大周期 K 线 CSV。
+///
+/// `trading_days` 与 `candles` 等长；全为 None 时退化为 10 列旧格式
+/// （crypto / 无交易日信息），任一有值时写 11 列表头（末列 `trading_day`）。
+pub fn save_csv_with_trading_days(
+    path: impl AsRef<Path>,
+    candles: &[Candle],
+    trading_days: &[Option<NaiveDate>],
+) -> io::Result<()> {
+    if candles.len() != trading_days.len() {
+        return Err(io::Error::other(format!(
+            "trading_day 长度 {} 与 K 线根数 {} 不一致",
+            trading_days.len(),
+            candles.len()
+        )));
+    }
+    if trading_days.iter().all(Option::is_none) {
+        return save_csv(path, candles);
+    }
+    let path = path.as_ref();
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir)?;
+    }
+    let tmp = path.with_extension("csv.tmp");
+    {
+        let mut wtr = csv::WriterBuilder::new().from_path(&tmp)?;
+        wtr.write_record(HEADER_ANNOTATED)?;
+        for (c, td) in candles.iter().zip(trading_days) {
+            let mut row = record_of(c).to_vec();
+            row.push(
+                td.map(|d| d.format("%Y-%m-%d").to_string())
+                    .unwrap_or_default(),
+            );
+            wtr.write_record(&row)?;
         }
         wtr.flush()?;
         wtr.into_inner().map_err(io::Error::other)?;
@@ -213,9 +278,23 @@ const HEADER: [&str; 10] = [
     "active_buy_quote_volume",
 ];
 
+/// 11 列表头：前 10 列同 [`HEADER`]，末列为交易所交易日。
+const HEADER_ANNOTATED: [&str; 11] = [
+    "timestamp",
+    "open",
+    "high",
+    "low",
+    "close",
+    "volume",
+    "quote_volume",
+    "trade_num",
+    "active_buy_volume",
+    "active_buy_quote_volume",
+    "trading_day",
+];
+
 /// 单根 K 线的 10 列字符串（与 save_csv/LiveCsvSink 共用）
-fn record_of(c: &Candle) -> [String; 10] {
-    [
+fn record_of(c: &Candle) -> [String; 10] {    [
         fmt_ts(c.open_time),
         fmt_f64(c.open),
         fmt_f64(c.high),
@@ -327,6 +406,41 @@ mod tests {
     fn load_missing_returns_empty() {
         let dir = tempfile::tempdir().unwrap();
         assert!(load_csv(dir.path().join("nope.csv")).unwrap().is_empty());
+    }
+
+    #[test]
+    fn annotated_roundtrip_writes_trading_day_column() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("CU_1d.csv");
+        let tds = [
+            Some(NaiveDate::from_ymd_opt(2026, 1, 5).unwrap()),
+            Some(NaiveDate::from_ymd_opt(2026, 1, 6).unwrap()),
+        ];
+        save_csv_with_trading_days(&path, &[candle(0, 100.0), candle(1, 101.0)], &tds)
+            .unwrap();
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            content.lines().next().unwrap().ends_with(",trading_day"),
+            "有交易日时必须写第 11 列表头"
+        );
+        assert!(content.contains("2026-01-05"));
+        let rows = load_csv_annotated(&path).unwrap();
+        assert_eq!(rows[1].1, tds[1]);
+        // 旧 API 不受新增列影响
+        assert_eq!(load_csv(&path).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn annotated_all_none_degrades_to_legacy_format() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("BTC_1d.csv");
+        save_csv_with_trading_days(&path, &[candle(0, 100.0)], &[None]).unwrap();
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !content.lines().next().unwrap().contains("trading_day"),
+            "全 None 保持 10 列旧格式"
+        );
+        assert!(load_csv_annotated(&path).unwrap()[0].1.is_none());
     }
 
     #[test]

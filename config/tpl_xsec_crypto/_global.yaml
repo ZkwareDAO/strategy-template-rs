@@ -1,0 +1,9 @@
+# template_xsec 组基线（crypto 横截面）
+mode: paper_trading
+warmup_days: 30
+cash: 200.0
+
+services:
+  trading:
+    exchange: binance
+    account: template_account

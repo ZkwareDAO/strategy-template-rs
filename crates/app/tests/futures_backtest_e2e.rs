@@ -128,7 +128,7 @@ fn run_dir_and_assert_charts(out_dir: &Path) -> PathBuf {
 #[test]
 fn futures_single_trend_cli_backtest_end_to_end() {
     let tmp = tempfile::tempdir().unwrap();
-    let cfg = stage_config(tmp.path(), "ctp_single_cu");
+    let cfg = stage_config(tmp.path(), "tpl_trend_futures");
     let data_dir = tmp.path().join("klines");
     seed_klines(&cfg, &data_dir, &[("CU", 78_000.0)]);
     let out_dir = tmp.path().join("out");
@@ -140,7 +140,7 @@ fn futures_single_trend_cli_backtest_end_to_end() {
 #[test]
 fn futures_xsec_trend_cli_backtest_end_to_end() {
     let tmp = tempfile::tempdir().unwrap();
-    let cfg = stage_config(tmp.path(), "ctp_multi_xsec");
+    let cfg = stage_config(tmp.path(), "tpl_xsec_futures");
     let data_dir = tmp.path().join("klines");
     // 品种价格量级接近真实，避免 1 手名义额远超组合预算导致永不成交。
     seed_klines(

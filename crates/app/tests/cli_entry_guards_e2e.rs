@@ -137,14 +137,14 @@ fn backtest_strategy_yaml_rejects_single_symbol_overrides() {
     let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config");
     std::fs::create_dir_all(tmp.path().join("cfg")).unwrap();
     let cfg = tmp.path().join("cfg/strategy.yaml");
-    std::fs::copy(repo.join("xsec_template/strategy.yaml"), &cfg).unwrap();
+    std::fs::copy(repo.join("tpl_xsec_crypto/strategy.yaml"), &cfg).unwrap();
 
     let out = run(&[
         "backtest",
         "--config",
         cfg.to_str().unwrap(),
         "--strategy",
-        "xsec_template",
+        "template_xsec",
         "--start",
         "20260101",
         "--end",
@@ -160,7 +160,7 @@ fn backtest_set_dir_is_refused_with_run_hint() {
     let set = tmp.path().join("set");
     std::fs::create_dir_all(set.join("g1")).unwrap();
     std::fs::copy(
-        repo.join("xsec_template/strategy.yaml"),
+        repo.join("tpl_xsec_crypto/strategy.yaml"),
         set.join("g1/strategy.yaml"),
     )
     .unwrap();
@@ -183,7 +183,7 @@ fn run_strategy_yaml_rejects_universe_overrides() {
     let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config");
     std::fs::create_dir_all(tmp.path().join("cfg")).unwrap();
     let cfg = tmp.path().join("cfg/strategy.yaml");
-    std::fs::copy(repo.join("xsec_template/strategy.yaml"), &cfg).unwrap();
+    std::fs::copy(repo.join("tpl_xsec_crypto/strategy.yaml"), &cfg).unwrap();
 
     let out = run(&[
         "run",

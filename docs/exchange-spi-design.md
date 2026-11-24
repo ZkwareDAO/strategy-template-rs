@@ -203,7 +203,7 @@ CTP 类数据源可能根本没有 `is_final` 字段，需要靠「会话边界 
 | 引擎 | `engine.rs:41-136, 182` | 单 `Feed` / 单 `PositionManager` / `client: BacktestOrderClient`（**具体类型**） |
 | 意图 | `core/src/signal.rs:175` | `SignalIntent` 无 exchange / market 字段 |
 | 网关 | `bootstrap.rs:210` | `exchange` 在**网关构造时**绑定为 `OrderVenueCfg`，非意图级分派 |
-| 全局市场 | `config.rs:144` | `services.kline.market` 每次运行单值（v2 校正：「crypto 与期货不要混跑」字样实见 `config/_global.example.yaml:55`、`config/example_dual_ma/CU.yaml:11`、`docs/RUNBOOK.md:184`，`config.rs:143` 注释仅为形态说明）（**已随 klines-service 退役，2026-11-10 删除**） |
+| 全局市场 | `config.rs:144` | `services.kline.market` 每次运行单值（v2 校正：「crypto 与期货不要混跑」字样实见 `config/_global.example.yaml:55`、`config/tpl_trend_crypto/CU.yaml:11`、`docs/RUNBOOK.md:184`，`config.rs:143` 注释仅为形态说明）（**已随 klines-service 退役，2026-11-10 删除**） |
 | 合约表 | `config/contracts.yaml` | `BTreeMap<symbol, ContractSpec>`，无 exchange 维度 |
 | 报表 / Store | `main.rs:306`、`positions/src/manager.rs:47` | 目录只按 symbol；持久化行按 `strategy_name` 过滤，无 exchange 维度（v2 勘误：过滤点在 positions，原误标 `store/src/lib.rs:405`，该处为 flush 快照路径） |
 
@@ -906,8 +906,8 @@ exchanges:
       AU: { multiplier: 1000, tick_size: 0.02, ... }
 
 instruments:                       # 一次运行可混跑多个交易所
-  - { exchange: binance, product: BTCUSDT, strategy: example_dual_ma }
-  - { exchange: ctp,     product: CU,      role: main, strategy: example_dual_ma }
+  - { exchange: binance, product: BTCUSDT, strategy: template_trend }
+  - { exchange: ctp,     product: CU,      role: main, strategy: template_trend }
 ```
 
 ### 启动流程

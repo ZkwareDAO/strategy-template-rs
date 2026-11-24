@@ -32,17 +32,17 @@ cargo test --workspace # 基线应全绿
 ```bash
 # 教学样例（统一端口 strategy.yaml，N=1）
 cargo run -p strategy-app -- backtest \
-  --config config/example_dual_ma/strategy.yaml \
+  --config config/tpl_trend_crypto/strategy.yaml \
   --start 20260801 --end 20260826
 
 # 横截面示例
 cargo run -p strategy-app -- backtest \
-  --config config/xsec_momentum/strategy.yaml \
+  --config config/tpl_xsec_crypto/strategy.yaml \
   --start 20260801 --end 20260826 --initial-cash 10000
 
 # 期货示例（CU/SHFE，15m 触发 + 1h 趋势；数据需先 roll_build）
 cargo run -p strategy-app -- backtest \
-  --config config/ctp_single_cu/strategy.yaml \
+  --config config/tpl_trend_futures/strategy.yaml \
   --start 20260101 --end 20260630
 ```
 
@@ -76,19 +76,19 @@ risk 都写在配置里。
 ## 4. 写你自己的策略
 
 推荐用 `StrategyBase`（`common/mod.rs`）实现 `StrategyLogic` 五个钩子；
-最小可跑起点直接复制 `xsec_momentum.rs`（直接实现 port）；
-需要完全自定义决策流时，再复制 `example_dual_ma.rs` 或 `xsec_template.rs`；
-期货起点用 `futures_single_trend.rs` / `futures_xsec_trend.rs`：
+最小可跑起点直接复制 `template_xsec.rs`（直接实现 port）；
+需要完全自定义决策流时，再复制 `template_trend.rs` 或 `template_xsec.rs`；
+期货起点用 `template_trend.rs` / `template_xsec.rs`：
 
 ```bash
-cp crates/strategies/src/example_dual_ma.rs crates/strategies/src/my_strategy.rs
+cp crates/strategies/src/template_trend.rs crates/strategies/src/my_strategy.rs
 ```
 
 1. 改 `Params` 与逻辑；止损必须明确：用 `StrategyBase` 时 `stop()` 返回
    `StopSpec`，直接实现 port 时 `Open` 必须带 `stop_price`；否则本轮不开仓
 2. 文件尾 `register_strategy!(name: "my_strategy", ...)` —— **不要改任何其他文件**
 3. 建配置：
-   - 统一端口（推荐）：`config/<group>/strategy.yaml`（复制 `config/xsec_momentum/strategy.yaml`）
+   - 统一端口（推荐）：`config/<group>/strategy.yaml`（复制 `config/tpl_xsec_crypto/strategy.yaml`）
    - 旧单标（已标记退役，仅兼容历史配置）：`config/my_strategy/BTCUSDT.yaml`
      （文件名就是标的身份，见 `docs/RUNBOOK.md` §7.1）
 4. `cargo test --workspace` 后跑回测

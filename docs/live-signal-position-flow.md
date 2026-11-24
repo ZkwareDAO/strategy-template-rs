@@ -163,7 +163,7 @@ sequenceDiagram
 
 以下为**框架通用离场语义**（由 PositionManager 与 `Action` 变体支持），
 不代表某个具体策略。教学 example 中：
-- `example_dual_ma` / `example_mtf_trend` 只使用**硬止损** + **信号反转离场**
+- `template_trend` / `template_trend` 只使用**硬止损** + **信号反转离场**
   （两者均发 `Action::Close`，不发 `Action::UpdateStop`）；
 - **趋势止盈**（`exit_active` / `Action::UpdateExit`）与**移动止损**
   （`Action::UpdateStop` ratchet）由具备 SAR/Supertrend 类逻辑的策略使用，

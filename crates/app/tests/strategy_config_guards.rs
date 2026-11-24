@@ -10,8 +10,8 @@ use strategy_app::strategy_config::{
 
 fn base_yaml() -> String {
     r#"
-strategy_type: xsec_momentum
-strategy_id: xsec_momentum:default
+strategy_type: template_xsec
+strategy_id: template_xsec:default
 timeframes: [15m, 1h]
 indicators:
   adx: { tf: 15m, period: 14 }
@@ -59,7 +59,7 @@ fn parses_strategy_yaml_file_and_resolves_two_instruments() {
         spec.instruments[1].venue_key,
         "binance/crypto_perpetual/ETHUSDT"
     );
-    assert_eq!(spec.strategy_id, "xsec_momentum:default");
+    assert_eq!(spec.strategy_id, "template_xsec:default");
     assert_eq!(
         spec.instruments[0].timeframe, "15m",
         "base TF = timeframes[0]"
@@ -168,7 +168,7 @@ fn n1_old_strategy_uses_unified_registry() {
     let tmp = tempfile::tempdir().unwrap();
     let body = base_yaml()
         .replace(
-            "strategy_type: xsec_momentum\nstrategy_id: xsec_momentum:default\n",
+            "strategy_type: template_xsec\nstrategy_id: template_xsec:default\n",
             "",
         )
         .replace(
@@ -179,7 +179,7 @@ fn n1_old_strategy_uses_unified_registry() {
         tmp.path(),
         "strategy.yaml",
         &format!(
-            "strategy_type: example_dual_ma\n{}{}",
+            "strategy_type: template_trend\n{}{}",
             body,
             universe("  - BTCUSDT")
         ),
@@ -191,7 +191,7 @@ fn n1_old_strategy_uses_unified_registry() {
         "N=1 旧策略必须走横截面 L1（trailing 关闭）"
     );
     let strategy = build_strategy(&spec).expect("旧策略必须已在统一注册表");
-    assert_eq!(strategy.strategy_type(), "example_dual_ma");
+    assert_eq!(strategy.strategy_type(), "template_trend");
 }
 
 #[test]
@@ -202,7 +202,7 @@ fn n2_unknown_strategy_lists_all_registered() {
         "strategy.yaml",
         &format!(
             "strategy_type: nope\n{}{}",
-            base_yaml().replace("strategy_type: xsec_momentum\n", ""),
+            base_yaml().replace("strategy_type: template_xsec\n", ""),
             universe("  - BTCUSDT\n  - ETHUSDT")
         ),
     );
@@ -211,8 +211,8 @@ fn n2_unknown_strategy_lists_all_registered() {
         Ok(_) => panic!("未知策略必须报错"),
         Err(e) => e.to_string(),
     };
-    assert!(err.contains("xsec_momentum"), "{err}");
-    assert!(err.contains("example_dual_ma"), "{err}");
+    assert!(err.contains("template_xsec"), "{err}");
+    assert!(err.contains("template_trend"), "{err}");
 }
 
 #[test]
@@ -220,12 +220,12 @@ fn old_dir_loader_ignores_strategy_yaml() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().join("config");
     write(
-        &root.join("example_dual_ma"),
+        &root.join("template_trend"),
         "BTCUSDT.yaml",
-        "strategy: example_dual_ma\ntimeframe: 8h\n",
+        "strategy: template_trend\ntimeframe: 8h\n",
     );
     let strategy_file = write(
-        &root.join("example_dual_ma").join("strategy"),
+        &root.join("template_trend").join("strategy"),
         "strategy.yaml",
         &format!("{}{}", base_yaml(), universe("  - BTCUSDT")),
     );
@@ -234,7 +234,7 @@ fn old_dir_loader_ignores_strategy_yaml() {
     assert_eq!(cfg.symbols[0].symbol, "BTCUSDT");
     assert!(is_strategy_config_path(&strategy_file));
     assert!(!is_strategy_config_path(
-        &root.join("example_dual_ma/BTCUSDT.yaml")
+        &root.join("template_trend/BTCUSDT.yaml")
     ));
 }
 
@@ -304,7 +304,7 @@ fn set_group_yaml(strategy_id: &str, symbols: &str) -> String {
     format!(
         "{}{}",
         base_yaml().replace(
-            "strategy_id: xsec_momentum:default",
+            "strategy_id: template_xsec:default",
             &format!("strategy_id: {strategy_id}")
         ),
         universe(symbols)
@@ -475,23 +475,23 @@ fn set_dir_follows_symlinked_group_directory() {
 }
 
 #[test]
-fn xsec_template_sample_config_loads_and_instantiates() {
+fn template_xsec_sample_config_loads_and_instantiates() {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../config/xsec_template/strategy.yaml");
+        .join("../../config/tpl_xsec_crypto/strategy.yaml");
     let spec = load_strategy(&path).expect("示例配置必须可加载");
-    assert_eq!(spec.strategy_type, "xsec_template");
-    assert_eq!(spec.strategy_id, "xsec_template:default");
+    assert_eq!(spec.strategy_type, "template_xsec");
+    assert_eq!(spec.strategy_id, "template_xsec:crypto");
     assert_eq!(spec.instruments.len(), 2);
     build_strategy(&spec).expect("模板必须已注册");
 }
 
 #[test]
-fn xsec_template_single_config_loads_without_rebalance() {
+fn tpl_trend_crypto_config_loads_without_rebalance() {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../config/xsec_template_single/strategy.yaml");
+        .join("../../config/tpl_trend_crypto/strategy.yaml");
     let spec = load_strategy(&path).expect("单标配置必须可加载");
-    assert_eq!(spec.strategy_type, "xsec_template");
-    assert_eq!(spec.strategy_id, "xsec_template:single");
+    assert_eq!(spec.strategy_type, "template_trend");
+    assert_eq!(spec.strategy_id, "template_trend:btc");
     assert_eq!(spec.instruments.len(), 1);
     assert!(spec.config.rebalance.is_none(), "N=1 可不配 rebalance");
     build_strategy(&spec).expect("模板必须已注册");
@@ -514,7 +514,7 @@ fn every_repo_config_dir_loads_and_instantiates() {
         checked += 1;
     }
     assert!(
-        checked >= 5,
+        checked >= 4,
         "仓库样例配置目录过少（{checked}），扫描逻辑可能失效"
     );
 }
@@ -523,12 +523,12 @@ fn every_repo_config_dir_loads_and_instantiates() {
 fn futures_templates_load_and_instantiate() {
     for (rel, strategy_type) in [
         (
-            "../../config/ctp_single_cu/strategy.yaml",
-            "futures_single_trend",
+            "../../config/tpl_trend_futures/strategy.yaml",
+            "template_trend",
         ),
         (
-            "../../config/ctp_multi_xsec/strategy.yaml",
-            "futures_xsec_trend",
+            "../../config/tpl_xsec_futures/strategy.yaml",
+            "template_xsec",
         ),
     ] {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(rel);

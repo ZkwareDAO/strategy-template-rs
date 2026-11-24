@@ -216,7 +216,7 @@ D3  口径收口：README/RUNBOOK.md §8 回退条目去 --engine old；设计�
 `deny_unknown_fields`，删键会让存量 yaml 硬错），改为 `warn_bar_merge_deprecated`
 **告警一次**——原「写了不生效也不报错」的用户陷阱已消除。聚合真源为
 `CtpExchange::aggregation_policy`（`ctp/mod.rs:219-221` → `SessionWindowPolicy`）
-+ `contracts.yaml`；`config/example_dual_ma/CU.yaml` 与 `_global.example.yaml`
++ `contracts.yaml`；`config/tpl_trend_crypto/CU.yaml` 与 `_global.example.yaml`
 的示例声明同步去掉；RUNBOOK §7.1 已改为「已废弃字段，写了不生效」。
 
 - 残差实测：`BarMergeMode` 57 → **32**（余量集中在待删的 `data/src/feed.rs` 本体
@@ -471,7 +471,7 @@ R4 与 D1 之间保留一段净主干观察窗（建议 ≥1 周实盘/仿真在
    `BTCUSDT.yaml`），样例名实不符本就是这坑的一半，引用面 6 处文档同步。
    另修 `main.rs` 两处：找不到数据时报错带出行键与期望 CSV 路径（身份错位不再伪装成
    数据缺失）、杠杆回落从目录级改取已解析的 `spec.leverage`。
-   实跑对钉：目录模式 `--config config/example_dual_ma --symbol BTCUSDT` ⇒
+   实跑对钉：目录模式 `--config config/tpl_trend_crypto --symbol BTCUSDT` ⇒
    `bars=131040 / fills=27 / cash_final=6939.6933`，与单文件模式逐位一致（**同一份数据、
    两条路径同结果**才是根治的证据，只断言"不报错"不够）。
    账本：**540 passed / 0 failed / 3 ignored**（= 533 + 7）。两条旧案

@@ -65,20 +65,25 @@ pub fn generate_charts(
 
 /// 日线 OHLC 序列（过滤到权益时间范围）。
 /// 优先读 1d CSV；缺失时用 1m 聚合出 UTC 日线，避免只有 1m 数据时图上没有 K 线。
+/// 日期标签优先用 CSV 的 `trading_day` 列（期货夜盘归次日交易日），
+/// 缺失时回落 `open_time` 的 UTC 日期（crypto / 旧 10 列文件 / 1m 兜底）。
 fn load_daily_ohlc(
     data_dir: &Path,
     venue_key: &str,
     start_date: &str,
     end_date: &str,
 ) -> Option<Vec<(NaiveDate, Candle)>> {
-    let mut candles: Vec<Candle> =
-        csv_store::load_or_empty(data_dir, venue_key, Timeframe::D1).unwrap_or_default();
+    let path = csv_store::resolve_csv_path(data_dir, venue_key, Timeframe::D1);
+    let mut candles = csv_store::load_csv_annotated(&path).unwrap_or_default();
     if candles.is_empty() {
         let m1 = csv_store::load_or_empty(data_dir, venue_key, Timeframe::M1).ok()?;
         if m1.is_empty() {
             return None;
         }
-        candles = aggregate_1m(&m1, Timeframe::D1, true);
+        candles = aggregate_1m(&m1, Timeframe::D1, true)
+            .into_iter()
+            .map(|c| (c, None))
+            .collect();
     }
     if candles.is_empty() {
         return None;
@@ -86,10 +91,10 @@ fn load_daily_ohlc(
     let start = NaiveDate::parse_from_str(start_date, "%Y-%m-%d").ok()?;
     let end = NaiveDate::parse_from_str(end_date, "%Y-%m-%d").ok()?;
     let rows: Vec<(NaiveDate, Candle)> = candles
-        .iter()
-        .filter_map(|c| {
-            let d = c.open_time.date_naive();
-            (d >= start && d <= end).then_some((d, *c))
+        .into_iter()
+        .filter_map(|(c, trading_day)| {
+            let d = trading_day.unwrap_or_else(|| c.open_time.date_naive());
+            (d >= start && d <= end).then_some((d, c))
         })
         .collect();
     (!rows.is_empty()).then_some(rows)

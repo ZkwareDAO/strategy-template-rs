@@ -57,14 +57,14 @@
 ```text
 用户要单标还是多标？
 ├─ 单标 N=1
-│   ├─ crypto → 复制 example_dual_ma.rs（直接 port，最小）
-│   └─ futures → 复制 futures_single_trend.rs（整数手 + 时段）
+│   ├─ crypto → 复制 template_trend.rs（直接 port，最小）
+│   └─ futures → 复制 template_trend.rs（整数手 + 时段）
 └─ 多标 N>1
-    ├─ crypto → 复制 xsec_momentum.rs（直接 port 横截面）
-    └─ futures → 复制 futures_xsec_trend.rs（1:N + 乘数）
+    ├─ crypto → 复制 template_xsec.rs（直接 port 横截面）
+    └─ futures → 复制 template_xsec.rs（1:N + 乘数）
 ```
 
-也可以用 `common::StrategyBase` 只写五个钩子；当前 6 个模板都直接实现 port，
+也可以用 `common::StrategyBase` 只写五个钩子；当前 2 个模板都直接实现 port，
 基类契约在 `common/mod.rs`。
 
 单标/多标的完整差异见 [CONFIG_REFERENCE.md](CONFIG_REFERENCE.md) §5。

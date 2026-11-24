@@ -541,7 +541,7 @@ flowchart LR
 | `positions` | 仓位唯一写者：开/加/减/平、峰值跟踪、止损价/回落止盈、止损冷却；Store position/stop/cooldown/history_position 四 model + 历史固定列 CSV | 直接下单 |
 | `broker` | `BacktestOrderClient`、`TradingServiceClient`（WS 三通道+重连）、脚本化 mock（测试/联调，常规编译）、exchange_orders.csv | 决策 |
 | `data` | KlineClient 端口与远程实现（单 `KlineEvent` 流）、Feed 1m 增量聚合、CSV、归档下载 | 决策 |
-| `strategies` | 策略插件（example_dual_ma / example_mtf_trend），build.rs 自动发现注册 | 直接 IO / 直接下单 |
+| `strategies` | 策略插件（template_trend / template_trend），build.rs 自动发现注册 | 直接 IO / 直接下单 |
 | `indicators` | SuperTrend / SAR / 效率比 / talib 封装（通用指标库） | 持有跨调用状态 |
 | `app` | 回测引擎（独立 Store + CandleClock）、**RuntimeActor（live 单写者内核）+ order_router + 监督重启**、bootstrap 进程装配、配置、CLI、报告 | 承载业务规则 |
 
@@ -667,7 +667,7 @@ sequenceDiagram
 
 ### 4.3 三种离场
 
-以 `example_dual_ma.rs` 为参照（初始止损 + 信号离场）：
+以 `template_trend.rs` 为参照（初始止损 + 信号离场）：
 
 | 离场 | 判定用价 | 触发条件 | 产物 | is_stop_loss |
 |------|---------|---------|------|-------------|

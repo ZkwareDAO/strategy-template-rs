@@ -13,7 +13,7 @@ fn write(path: &Path, text: &str) {
 /// §8 形态的共享基线：两个交易所 + 混跑清单（ctp 不配 subscription，
 /// 走直连计划——选主维度已由 engine 层测试覆盖）。
 const GLOBAL_MIXED: &str = r#"
-strategy: example_dual_ma
+strategy: template_trend
 timeframe: 8h
 
 exchanges:
@@ -53,12 +53,12 @@ instruments:
 fn mixed_exchanges_config_assembles_in_one_process() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
-    std::fs::create_dir(root.join("example_dual_ma")).unwrap();
+    std::fs::create_dir(root.join("template_trend")).unwrap();
     write(&root.join("_global.yaml"), GLOBAL_MIXED);
     // 目录模式要求至少一个 per-symbol 文件（扁平 schema，symbol 取文件名；
     // 旧链路形状不变）
     write(
-        &root.join("example_dual_ma/BTCUSDT.yaml"),
+        &root.join("template_trend/BTCUSDT.yaml"),
         "timeframe: 1h\n",
     );
 
@@ -106,7 +106,7 @@ fn mixed_exchanges_config_assembles_in_one_process() {
 fn instruments_validation_fails_loud() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
-    std::fs::create_dir(root.join("example_dual_ma")).unwrap();
+    std::fs::create_dir(root.join("template_trend")).unwrap();
     write(
         &root.join("_global.yaml"),
         r#"
@@ -116,7 +116,7 @@ instruments:
   - { exchange: dce, product: I2601 }
 "#,
     );
-    write(&root.join("example_dual_ma/X.yaml"), "timeframe: 1h\n");
+    write(&root.join("template_trend/X.yaml"), "timeframe: 1h\n");
     let cfg = config::load(Some(root)).unwrap();
     let registry = config::build_exchange_registry(&cfg).unwrap();
     // 未注册实例名：报错点名条目
@@ -129,10 +129,10 @@ instruments:
 fn legacy_config_without_exchanges_still_loads() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
-    std::fs::create_dir(root.join("example_dual_ma")).unwrap();
-    write(&root.join("_global.yaml"), "strategy: example_dual_ma\n");
+    std::fs::create_dir(root.join("template_trend")).unwrap();
+    write(&root.join("_global.yaml"), "strategy: template_trend\n");
     write(
-        &root.join("example_dual_ma/BTCUSDT.yaml"),
+        &root.join("template_trend/BTCUSDT.yaml"),
         "timeframe: 8h\n",
     );
     let cfg = config::load(Some(root)).unwrap();

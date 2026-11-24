@@ -39,7 +39,7 @@ fn candles(n: usize, base: f64, step: f64) -> Vec<Candle> {
 
 fn symbol_spec(symbol: &str) -> strategy_app::config::SymbolSpec {
     strategy_app::config::SymbolSpec {
-        strategy: "xsec_momentum".into(),
+        strategy: "template_xsec".into(),
         symbol: symbol.into(),
         timeframe: "1m".into(),
         cash: 200.0,
@@ -64,8 +64,8 @@ fn symbol_spec(symbol: &str) -> strategy_app::config::SymbolSpec {
 
 fn spec_two_symbols() -> StrategySpec {
     let config = strategy_engine::strategy::config::StrategyConfig {
-        strategy_type: "xsec_momentum".into(),
-        strategy_id: Some("xsec_momentum:default".into()),
+        strategy_type: "template_xsec".into(),
+        strategy_id: Some("template_xsec:default".into()),
         mode: strategy_engine::strategy::config::StrategyMode::CrossSectional,
         merge_positions: true,
         universe: vec![
@@ -97,8 +97,8 @@ fn spec_two_symbols() -> StrategySpec {
         params: None,
     };
     StrategySpec {
-        strategy_type: "xsec_momentum".into(),
-        strategy_id: "xsec_momentum:default".into(),
+        strategy_type: "template_xsec".into(),
+        strategy_id: "template_xsec:default".into(),
         config,
         instruments: vec![symbol_spec("BTCUSDT"), symbol_spec("ETHUSDT")],
         warmup_days: 0,
@@ -229,8 +229,8 @@ fn spec_with(
     params: Option<serde_json::Value>,
 ) -> StrategySpec {
     let mut cfg = strategy_engine::strategy::config::StrategyConfig {
-        strategy_type: "xsec_momentum".into(),
-        strategy_id: Some("xsec_momentum:default".into()),
+        strategy_type: "template_xsec".into(),
+        strategy_id: Some("template_xsec:default".into()),
         mode: strategy_engine::strategy::config::StrategyMode::CrossSectional,
         merge_positions: true,
         universe: universe
@@ -268,8 +268,8 @@ fn spec_with(
         cfg.rebalance = None;
     }
     StrategySpec {
-        strategy_type: "xsec_momentum".into(),
-        strategy_id: "xsec_momentum:default".into(),
+        strategy_type: "template_xsec".into(),
+        strategy_id: "template_xsec:default".into(),
         instruments: universe.iter().map(|u| symbol_spec(u)).collect(),
         config: cfg,
         warmup_days: 0,
@@ -486,7 +486,8 @@ fn entry_exit_scenario_with_sub_golden_exit_rule_leg() {
         .find(|f| f.signal_id.contains("_leg"))
         .expect("exit_rule 平仓 leg");
     // 黄金值：base = generate_sub_signal_id(..., at=t3(00:03), side=Short, ExitRule, 0)
-    let golden_base = "sub_da172a6a384a99a5";
+    // （strategy_type 改为 template_xsec 后的确定性哈希，同输入两次运行逐字节一致）
+    let golden_base = "sub_16d90164027dec8b";
     assert_eq!(
         close.signal_id,
         format!("{golden_base}_leg0"),
@@ -553,7 +554,7 @@ fn warmup_insufficient_blocks_opens() {
 }
 
 #[test]
-fn xsec_momentum_example_runs_two_symbols_and_trades() {
+fn template_xsec_example_runs_two_symbols_and_trades() {
     let mut inds = std::collections::BTreeMap::new();
     inds.insert(
         "macd".into(),
@@ -584,14 +585,14 @@ fn xsec_momentum_example_runs_two_symbols_and_trades() {
         cash: inst.cash,
         params: spec.config.params.as_ref(),
     };
-    let strategy = strategy_strategies::registry::create("xsec_momentum", &args).unwrap();
+    let strategy = strategy_strategies::registry::create("template_xsec", &args).unwrap();
     let (summary, rows, daily) = run_scenario(tmp.path(), strategy, &spec, &[btc, eth]);
     assert!(
         summary.rejected_actions <= summary.actions,
         "示例策略动作应基本成功"
     );
     assert!(!summary.fills.is_empty(), "400 根后应出现轮换成交");
-    assert_eq!(rows[0].strategy_name, "xsec_momentum:default");
+    assert_eq!(rows[0].strategy_name, "template_xsec:default");
     assert!(!daily.is_empty());
     assert!(
         summary.final_portfolio.rebalance_epoch >= 1,

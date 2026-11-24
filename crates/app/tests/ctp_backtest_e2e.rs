@@ -1,6 +1,6 @@
 //! strategy-app 集成测试 — CTP（CU）回测端到端（统一端口 + 生产 CLI）
 //!
-//! 链路：临时 config 目录（`example_dual_ma_cu/strategy.yaml` 副本 + 仓库 contracts.yaml）
+//! 链路：临时 config 目录（`tpl_trend_futures/strategy.yaml` 副本 + 仓库 contracts.yaml）
 //! → `strategy_config::load_strategy` 校验合约透传 → 合成 CTP 形态 1m 写入命名空间
 //! `data_dir/1m/SHFE/cn_futures/CU_1m.csv` → 调用 `strategy-rs backtest` 子命令
 //! → 校验统一报告与 `history_position` 产物。
@@ -48,24 +48,24 @@ fn find_where(root: &Path, pred: &dyn Fn(&Path) -> bool) -> Option<PathBuf> {
 fn ctp_backtest_cli_end_to_end_cu() {
     let tmp = tempfile::tempdir().unwrap();
     let cfg_root = tmp.path().join("config");
-    std::fs::create_dir_all(cfg_root.join("example_dual_ma_cu")).unwrap();
+    std::fs::create_dir_all(cfg_root.join("tpl_trend_futures")).unwrap();
     std::fs::copy(repo_contracts_yaml(), cfg_root.join("contracts.yaml"))
         .expect("复制仓库 config/contracts.yaml");
-    let repo_cfg = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config/example_dual_ma_cu");
+    let repo_cfg = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config/tpl_trend_futures");
     for f in ["strategy.yaml", "_global.yaml"] {
         std::fs::copy(
             repo_cfg.join(f),
-            cfg_root.join("example_dual_ma_cu").join(f),
+            cfg_root.join("tpl_trend_futures").join(f),
         )
         .expect("复制统一端口示例配置");
     }
-    let cfg = cfg_root.join("example_dual_ma_cu/strategy.yaml");
+    let cfg = cfg_root.join("tpl_trend_futures/strategy.yaml");
 
     // ① 生产配置解析 + 合约透传
     let spec = strategy_app::strategy_config::load_strategy(&cfg).expect("横截面配置应可解析");
     assert_eq!(spec.instruments.len(), 1);
     assert_eq!(spec.instruments[0].symbol, "CU");
-    assert_eq!(spec.instruments[0].timeframe, "1h");
+    assert_eq!(spec.instruments[0].timeframe, "15m");
     let contract = spec.instruments[0]
         .contract
         .as_ref()
@@ -131,6 +131,23 @@ fn ctp_backtest_cli_end_to_end_cu() {
         assert!(header.contains("position_id") && header.contains("exit_price"));
         assert!(header.contains("entry_size") && header.contains("exit_size"));
     }
+
+    // ⑥ 大周期导出带交易日标注（单标回测把聚合 K 线写回 data_dir）
+    let kline = find_where(&data_dir, &|p| {
+        p.file_name().and_then(|n| n.to_str()) == Some("CU_1h.csv")
+    })
+    .expect("回测应导出 CU_1h.csv");
+    let content = std::fs::read_to_string(&kline).unwrap();
+    let mut lines = content.lines();
+    let header = lines.next().unwrap_or_default();
+    assert!(
+        header.ends_with(",trading_day"),
+        "大周期导出必须带交易日列：{header}"
+    );
+    let first = lines.next().expect("至少一根 H1");
+    let td = first.rsplit(',').next().unwrap_or_default();
+    assert_eq!(td.len(), 10, "trading_day 应为 YYYY-MM-DD，实际 `{td}`");
+    assert!(td.contains('-'));
 
     eprintln!("e2e 摘要：run_dir={}", run_dir.display());
 }

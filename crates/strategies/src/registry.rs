@@ -96,11 +96,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn example_dual_ma_registered() {
+    fn template_trend_registered() {
         let names: Vec<&str> = all().iter().map(|e| e.name).collect();
         assert!(
-            names.contains(&"example_dual_ma"),
-            "example_dual_ma 应在注册表: {names:?}"
+            names.contains(&"template_trend"),
+            "template_trend 应在注册表: {names:?}"
         );
     }
 
@@ -118,15 +118,15 @@ mod tests {
     }
 
     #[test]
-    fn create_example_dual_ma_ok() {
+    fn create_template_trend_ok() {
         let args = FactoryArgs {
             symbol: "BTCUSDT",
             timeframe: "8h",
             cash: 200.0,
             params: None,
         };
-        let s = create("example_dual_ma", &args).unwrap();
-        assert_eq!(s.strategy_type(), "example_dual_ma");
+        let s = create("template_trend", &args).unwrap();
+        assert_eq!(s.strategy_type(), "template_trend");
     }
 
     #[test]
@@ -144,7 +144,7 @@ mod tests {
         let err = err.to_string();
         assert!(err.contains("未知策略: nope"));
         assert!(
-            err.contains("example_dual_ma"),
+            err.contains("template_trend"),
             "错误应动态列出可用策略: {err}"
         );
     }

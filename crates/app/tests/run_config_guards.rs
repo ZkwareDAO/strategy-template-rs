@@ -13,8 +13,8 @@ use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
 /// 统一端口策略体（可被加载/校验；策略用真实注册名）。
-const STRATEGY_BODY: &str = r#"strategy_type: example_dual_ma
-strategy_id: example_dual_ma:guard
+const STRATEGY_BODY: &str = r#"strategy_type: template_trend
+strategy_id: template_trend:guard
 universe:
   - BTCUSDT
 timeframes: [1h, 1m]
@@ -243,7 +243,7 @@ fn set_dir_run_starts_all_groups_in_paper() {
         let group = set.join(name);
         std::fs::create_dir_all(&group).unwrap();
         let body = STRATEGY_BODY
-            .replace("example_dual_ma:guard", &format!("example_dual_ma:{name}"))
+            .replace("template_trend:guard", &format!("template_trend:{name}"))
             .replace("- BTCUSDT", &format!("- {symbol}"));
         std::fs::write(group.join("strategy.yaml"), body).unwrap();
     }
@@ -279,7 +279,7 @@ fn set_group_mode_mismatch_is_refused() {
         let group = set.join(name);
         std::fs::create_dir_all(&group).unwrap();
         let body =
-            STRATEGY_BODY.replace("example_dual_ma:guard", &format!("example_dual_ma:{name}"));
+            STRATEGY_BODY.replace("template_trend:guard", &format!("template_trend:{name}"));
         std::fs::write(group.join("strategy.yaml"), body).unwrap();
     }
     // g2 组基线改为 live → 与 g1（继承 paper）解析结果不一致。

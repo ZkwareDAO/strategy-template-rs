@@ -142,6 +142,11 @@ pub struct BarExtensions {
     pub open_interest: Option<f64>,
     /// 结算价（日结算 / 保证金盯市）
     pub settlement_price: Option<f64>,
+    /// 交易所交易日（期货：夜盘归次日交易日；crypto：UTC 自然日）。
+    /// 只作元数据随 Bar 透传，不参与排序/水位——主键仍是 `open_time`。
+    /// 由聚合层按 `SessionRules::trading_day_of`/`BucketId::trading_day` 写入；
+    /// 直接构造的 Bar（如回放前的原始帧）为 None。
+    pub trading_day: Option<TradingDay>,
 }
 
 impl Bar {
@@ -171,6 +176,8 @@ impl Bar {
                 taker_buy_volume: Some(c.active_buy_volume),
                 open_interest: None,
                 settlement_price: None,
+                // Candle 无交易日元数据；由聚合层在 on_closed_1m 按 SessionRules 补齐。
+                trading_day: None,
             },
         }
     }

@@ -392,6 +392,24 @@ impl CrossSectionalRunnerGroup {
         (srcs, keys)
     }
 
+    /// 导出用快照：每个 slot 的标的 + 全部已闭合大周期 `Bar`（含
+    /// `extensions.trading_day`）。CSV 写入留在 app 层（engine 不依赖 data）。
+    pub fn closed_exports(
+        &self,
+    ) -> Vec<(crate::core::identity::InstrumentId, Timeframe, Vec<Bar>)> {
+        let mut out = Vec::new();
+        for slot in &self.slots {
+            for &tf in slot.state.timeframes() {
+                if tf.0 <= 1 {
+                    continue;
+                }
+                let bars = slot.state.closed(tf).iter().cloned().collect();
+                out.push((slot.parts.instrument.clone(), tf, bars));
+            }
+        }
+        out
+    }
+
     /// 消费一个已对齐事件。返回该事件触发的轮次报告（切换轮次时返回上一个
     /// pending 决策轮的报告；换时间戳到达由调用方保证事件有序性）。
     pub fn on_event(&mut self, ev: AlignedEvent) -> Result<Option<RoundReport>> {
@@ -455,6 +473,14 @@ impl CrossSectionalRunnerGroup {
     /// 取走最后一次 flush 的轮次报告（`finish` 后调用可补采最后一根净值）。
     pub fn take_last_round(&mut self) -> Option<RoundReport> {
         self.last_round.take()
+    }
+
+    /// 组内交易日口径（取首个 slot 的 SessionRules）：横截面组按同市场装配；
+    /// crypto 返回 UTC 自然日，期货返回交易日。用于日报/导出的交易日标注。
+    pub fn trading_day_at(&self, at: DateTime<Utc>) -> Option<TradingDay> {
+        self.slots
+            .first()
+            .map(|s| s.parts.session.trading_day_of(at))
     }
 
     /// 取当前活动总仓；没有可用总仓时创建 `master_{seq:06}`。

@@ -160,9 +160,21 @@ impl SpiBacktest {
             if bars.is_empty() {
                 continue;
             }
-            strategy_data::csv_store::save_csv(
+            // 交易日标注从 engine 聚合状态取（Candle 视图不透传 BarExtensions）。
+            // 长度不一致说明桥接缓存未刷新——宁可不标注，也不写错位数据。
+            let state = self.runner.state.closed(tf);
+            let tds: Vec<Option<chrono::NaiveDate>> = if state.len() == bars.len() {
+                state
+                    .iter()
+                    .map(|b| b.extensions.trading_day.map(|d| d.0))
+                    .collect()
+            } else {
+                vec![None; bars.len()]
+            };
+            strategy_data::csv_store::save_csv_with_trading_days(
                 strategy_data::csv_store::csv_path(base, venue_key, core_tf),
                 bars,
+                &tds,
             )?;
             written += 1;
         }
@@ -346,7 +358,14 @@ pub fn run_from_spec(args: SpiRunArgs) -> anyhow::Result<SpiBacktestRun> {
             .map_err(|e| anyhow::anyhow!("engine 主循环失败: {e}"))?;
         if let Some(acct) = bt.account_view() {
             // 本根收盘盯市后取权益——与旧 `on_equity_mark(c)` 同一时点
-            sink.on_1m_close(t, acct.equity(), acct.cash, tf_minutes);
+            let trading_day = bt.runner.parts.session.trading_day_of(t).0;
+            sink.on_1m_close_with_trading_day(
+                t,
+                acct.equity(),
+                acct.cash,
+                tf_minutes,
+                Some(trading_day),
+            );
             last_eq = Some((acct.equity(), acct.cash));
         }
     }
@@ -560,20 +579,42 @@ pub fn run_strategy_from_spec(args: StrategyRunArgs<'_>) -> anyhow::Result<Strat
             .on_event(ev)
             .map_err(|e| anyhow::anyhow!("主循环失败: {e}"))?
         {
-            sink.on_1m_close(r.at, r.nav, r.cash, base_tf.0);
+            let trading_day = group.trading_day_at(r.at).map(|d| d.0);
+            sink.on_1m_close_with_trading_day(r.at, r.nav, r.cash, base_tf.0, trading_day);
         }
     }
     let summary = group
         .finish()
         .map_err(|e| anyhow::anyhow!("收口失败: {e}"))?;
     if let Some(last) = group.take_last_round() {
-        sink.on_1m_close(last.at, last.nav, last.cash, base_tf.0);
+        let trading_day = group.trading_day_at(last.at).map(|d| d.0);
+        sink.on_1m_close_with_trading_day(last.at, last.nav, last.cash, base_tf.0, trading_day);
     }
     store
         .flush()
         .map_err(|e| anyhow::anyhow!("回测状态 flush 失败: {e}"))?;
     let trade_rows =
         fills_to_strategy_trade_rows(&summary.fills, &spec.strategy_id, &spec.strategy_type);
+
+    // 大周期 K 线导出（含交易日标注）：与单标 `export_merged_klines` 同布局/格式。
+    for (inst, tf, bars) in group.closed_exports() {
+        let core_tf = strategy_core::candle::Timeframe::from(tf);
+        let candles: Vec<Candle> = bars
+            .iter()
+            .map(strategy_engine::bridge::bar_to_candle)
+            .collect();
+        let tds: Vec<Option<chrono::NaiveDate>> = bars
+            .iter()
+            .map(|b| b.extensions.trading_day.map(|d| d.0))
+            .collect();
+        strategy_data::csv_store::save_csv_with_trading_days(
+            strategy_data::csv_store::csv_path(args.data_dir, &inst.namespaced_key(), core_tf),
+            &candles,
+            &tds,
+        )
+        .map_err(|e| anyhow::anyhow!("导出 {} K 线失败: {e}", inst.namespaced_key()))?;
+    }
+
     Ok(StrategyBacktestRun {
         summary,
         trade_rows,

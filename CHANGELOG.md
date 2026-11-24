@@ -6,6 +6,13 @@
 
 ## [Unreleased]
 
+### Changed — 模板策略合并（6→2）与配置精简
+
+- `crates/strategies/src/` 只保留两个模板：`template_trend`（逐标：EMA 交叉/趋势过滤 + 百分比或 ATR 止损）与 `template_xsec`（横截面：参数化排名 + 趋势过滤 + 等权调仓，N=1 退化为单标）；原 6 个模板删除，测试夹具与断言同步迁移。
+- 配置目录 8 → 4：`config/tpl_trend_crypto`、`config/tpl_trend_futures`、`config/tpl_xsec_crypto`、`config/tpl_xsec_futures`。
+- 大周期 CSV 导出增加可选 `trading_day` 列；报表日线与图表按交易所交易日标注（期货夜盘归次日，crypto 为 UTC 自然日）。
+- 期货 D1 聚合修复：午休/隔夜 `SessionGap` 不再切断 D1，一个交易日只产出一根日线。
+
 ### Added — 横截面多组同进程（PR-6：配置集）
 
 - **配置集装载**：`config set` 目录（无顶层 `strategy.yaml`，每个直接子目录一组；

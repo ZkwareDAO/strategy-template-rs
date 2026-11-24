@@ -1,4 +1,4 @@
-# ctp_single_cu 组基线：回测用，只提供初始权益与交易所回落。
+# template_trend 组基线（期货单标）
 mode: paper_trading
 warmup_days: 60
 initial_cash: 1000000

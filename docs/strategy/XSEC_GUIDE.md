@@ -7,7 +7,7 @@
 
 - **推荐**：用 `crates/strategies/src/common/mod.rs` 的 `StrategyBase` + `StrategyLogic`
   写 alpha 钩子（打分/入场过滤/止损），单标与横截面骨架由基类提供。
-- **直接实现 port**：复制 `crates/strategies/src/xsec_template.rs`，自己写双路径分支。
+- **直接实现 port**：复制 `crates/strategies/src/template_xsec.rs`，自己写双路径分支。
 
 ## 1. 唯一策略接口
 
@@ -39,7 +39,7 @@ SPI 单标路径（`ExchangeRunner`）走同一 port：`PortStrategyBridge` 以�
   `xsec_` 前缀是历史命名，不是约定；模块路径统一是 `strategy_engine::strategy`。
 - **基类**：`common::StrategyBase` 已沉淀单标/横截面两条决策路径；策略文件只实现
   `StrategyLogic`（`name` / `top_k` / `score` / `entry_allowed` / `stop`）。
-- **模板**：`xsec_template` 是直接实现 port 的参考；复制为 `src/<name>.rs` 即可起步。
+- **模板**：`template_xsec` 是直接实现 port 的参考；复制为 `src/<name>.rs` 即可起步。
 
 ## 3. 从零写策略
 
@@ -64,13 +64,13 @@ SPI 单标路径（`ExchangeRunner`）走同一 port：`PortStrategyBridge` 以�
 - `portfolio.master.state == Closing` 时直接返回空动作，不开仓/不加仓/不调仓。
 - 退出（止损/止盈/组合回撤）交给配置 `exit` / `portfolio_exit`，基类不产生 `Close`。
 
-参考实现：`xsec_momentum`（crypto 横截面）、`futures_xsec_trend`（期货 1:N）。
+参考实现：`template_xsec`（crypto 横截面）、`template_xsec`（期货 1:N）。
 两者都直接实现 port；`StrategyBase` 的通用行为由 `common/mod.rs` 与
 `crates/strategies/tests/strategy_base.rs` 定义，当前模板未附 `StrategyBase` 版策略文件。
 
-### 3.2 直接实现 port：复制 xsec_template
+### 3.2 直接实现 port：复制 template_xsec
 
-复制 `crates/strategies/src/xsec_template.rs` 为 `src/<name>.rs`，按以下顺序改：
+复制 `crates/strategies/src/template_xsec.rs` 为 `src/<name>.rs`，按以下顺序改：
 
 1. 改类型名与 `TemplateParams` 默认值（`rank_indicator` 默认 `"macd"`、`higher_is_better`
    默认 `true`、`top_k` 默认 `3`）。
@@ -170,8 +170,8 @@ SPI 单标路径（`ExchangeRunner`）走同一 port：`PortStrategyBridge` 以�
 
 | 字段 | 说明 |
 |---|---|
-| `strategy_type` | 注册名，例如 `xsec_template` / `xsec_momentum` |
-| `strategy_id` | 组合 ID，例如 `xsec_template:default`；多组配置集内必须唯一 |
+| `strategy_type` | 注册名，例如 `template_xsec` / `template_xsec` |
+| `strategy_id` | 组合 ID，例如 `template_xsec:default`；多组配置集内必须唯一 |
 | `universe` | 标的列表；1 条字符串 = 单所默认，`{symbol, exchange}` 为完整形 |
 | `timeframes` | `timeframes[0]` = base TF（决策节奏） |
 | `indicators` | 指标级 tf 绑定；白名单 `adx/rsi/ema/sma/atr/macd` |
@@ -218,21 +218,21 @@ SPI 单标路径（`ExchangeRunner`）走同一 port：`PortStrategyBridge` 以�
 ## 7. 单体起步 → 加代币变多体
 
 1. **单标**：`universe` 写 1 个标的，省略 `rebalance`，运行
-   `config/xsec_template_single/strategy.yaml`。模板走单标路径。
+   `config/tpl_trend_crypto/strategy.yaml`。模板走单标路径。
 2. **加代币**：`universe` 加第二行（例如 `BNBUSDT`），补 `rebalance`
    （`top_k` ≤ universe 数、与 `params.top_k` 同值），运行
-   `config/xsec_template/strategy.yaml`。同一份策略代码自动切横截面路径。
+   `config/tpl_xsec_crypto/strategy.yaml`。同一份策略代码自动切横截面路径。
 3. 不需要改任何注册文件；同一份策略代码自动切横截面路径。
 
 ```bash
 # 单标
 cargo run -p strategy-app -- backtest \
-  --config config/xsec_template_single/strategy.yaml \
+  --config config/tpl_trend_crypto/strategy.yaml \
   --start 20260901 --end 20260915 --data-dir ./data/klines
 
 # 横截面（同一模板，加了一行代币与 rebalance）
 cargo run -p strategy-app -- backtest \
-  --config config/xsec_template/strategy.yaml \
+  --config config/tpl_xsec_crypto/strategy.yaml \
   --start 20260901 --end 20260915 --data-dir ./data/klines
 ```
 
@@ -240,19 +240,19 @@ cargo run -p strategy-app -- backtest \
 
 - 基类测试：`crates/strategies/tests/strategy_base.rs`，覆盖单标开仓/跳过、
   横截面 `rebalance_due`、排名、等权调仓、掉出 `top_k`、`max_total_notional` 预算。
-- 模板单测：`crates/strategies/src/xsec_template.rs` 的 `#[cfg(test)]` 模块，
+- 模板单测：`crates/strategies/src/template_xsec.rs` 的 `#[cfg(test)]` 模块，
   覆盖单标无 `rebalance`、横截面 `rebalance_due`、特征缺失、调仓、`params` 校验。
 - 注册集成测试：`crates/strategies/tests/registry.rs`（注册名 = `strategy_type()`，
   且每个策略都声明 1m）。
 - 配置装配测试：`crates/app/tests/strategy_config_guards.rs` 的
-  `xsec_template_sample_config_loads_and_instantiates` 与
-  `xsec_template_single_config_loads_without_rebalance`。
+  `template_xsec_sample_config_loads_and_instantiates` 与
+  `template_xsec_single_config_loads_without_rebalance`。
 - 端到端：`crates/app/tests/strategy_backtest_e2e.rs`、
   `strategy_live_mock_e2e.rs`；回测/paper 一致性由这两个用例端到端验收。
 
 ```bash
 cargo test -p strategy-strategies
-cargo test -p strategy-app --test strategy_config_guards xsec_template
+cargo test -p strategy-app --test strategy_config_guards template_xsec
 cargo test -p strategy-app --test strategy_backtest_e2e
 ```
 

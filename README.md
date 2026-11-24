@@ -33,28 +33,28 @@ cargo test --workspace
 
 # 2. 跑一次回测（数据已在 data/klines/；缺则先 download）
 cargo run -p strategy-app -- backtest \
-  --config config/example_dual_ma/strategy.yaml \
+  --config config/tpl_trend_crypto/strategy.yaml \
   --start 20260801 --end 20260826
 
 # 3. 复制 example 写你的策略
-cp crates/strategies/src/example_dual_ma.rs crates/strategies/src/my_strategy.rs
+cp crates/strategies/src/template_trend.rs crates/strategies/src/my_strategy.rs
 ```
 
 详见 [`docs/strategy/QUICKSTART.md`](docs/strategy/QUICKSTART.md)。
 
 ## 新增策略（三步走）
 
-1. 复制 `crates/strategies/src/example_dual_ma.rs` 为你的策略文件；
+1. 复制 `crates/strategies/src/template_trend.rs` 为你的策略文件；
 2. 改策略名与逻辑，文件尾 `register_strategy!` 自注册——**无需修改任何其他文件**，
    `build.rs` 自动发现；
 3. 建配置 `config/<group>/strategy.yaml`（样例见
-   `config/example_dual_ma/strategy.yaml`），`strategy_type` 填注册名。
+   `config/tpl_trend_crypto/strategy.yaml`），`strategy_type` 填注册名。
    旧 per-symbol `<SYMBOL>.yaml` 仍被兼容读取，但已标记退役；新配置统一用
    `strategy.yaml` 或配置集（字段与单标/多标差异见 `docs/strategy/CONFIG_REFERENCE.md`）。
 
-模板策略（6 个，导读见 [`docs/strategy/EXAMPLES.md`](docs/strategy/EXAMPLES.md)）：
-- crypto：`example_dual_ma`、`example_mtf_trend`、`xsec_template`、`xsec_momentum`
-- 期货：`futures_single_trend`（1:1）、`futures_xsec_trend`（1:N）
+模板策略（2 个，导读见 [`docs/strategy/EXAMPLES.md`](docs/strategy/EXAMPLES.md)）：
+- `template_trend`：逐标趋势（crypto 单标 / 期货单标，同一份代码）
+- `template_xsec`：横截面轮动（crypto N=2 / 期货 N=3，N=1 退化为单标）
 
 ## 横截面策略（1 策略 → 1 总仓位 → N 子仓位；PR-1～PR-5，回测 + live/paper）
 
@@ -62,15 +62,15 @@ cp crates/strategies/src/example_dual_ma.rs crates/strategies/src/my_strategy.rs
 `universe` 加一行代币即升级为横截面，无需改代码。
 
 ```bash
-# 配置 = 策略级单文件 config/<strategy>/strategy.yaml（样例 config/xsec_momentum/strategy.yaml）
+# 配置 = 策略级单文件 config/<strategy>/strategy.yaml（样例 config/tpl_xsec_crypto/strategy.yaml）
 cargo run -p strategy-app -- backtest \
-  --config config/xsec_momentum/strategy.yaml \
+  --config config/tpl_xsec_crypto/strategy.yaml \
   --start 20260101 --end 20260601 --data-dir ./data/klines
 ```
 
 - **开发指南**：[docs/strategy/XSEC_GUIDE.md](docs/strategy/XSEC_GUIDE.md)（模板
-  `crates/strategies/src/xsec_template.rs`、示例配置
-  `config/xsec_template_single/strategy.yaml` 与 `config/xsec_template/strategy.yaml`）。
+  `crates/strategies/src/template_xsec.rs`、示例配置
+  `config/tpl_trend_crypto/strategy.yaml` 与 `config/tpl_xsec_crypto/strategy.yaml`）。
 - **schema**：`universe`（1 条字符串 = 单所默认；`{symbol, exchange}` 完整形）、
   `timeframes[0]` = base TF（决策节奏）、`indicators`（指标级 tf 绑定）、
   `entry`/`exit`（default + overrides，AND 纯函数）、`portfolio_exit`
@@ -78,7 +78,7 @@ cargo run -p strategy-app -- backtest \
   （两阶段：先减仓确认、后加仓）、`risk/sizing`（杠杆上限、per_position_pct）。
 - **新策略**：在 `crates/strategies/src/<name>.rs` 实现
   `strategy_engine::strategy::port::CrossSectionalStrategyPort`，文件尾
-  `register_strategy!` 自注册（示例 `xsec_momentum`、模板 `xsec_template`）；
+  `register_strategy!` 自注册（模板 `template_trend` / `template_xsec`）；
   `build.rs` 自动发现，无需改其他文件。
 - **数据模型**：`SubPosition`/`StrategyPortfolio` 走统一 Store；`MasterPosition`
   为派生视图不落表；子仓位与信号 ID 统一用 `sub_` 命名空间。
@@ -148,7 +148,7 @@ initial_cash: 1000000    # 回测账户初始权益（元）
 | `positions` | PositionManager（开/加/减/平、峰值跟踪、止损价/回落止盈、止损冷却）、四个 model、对外历史仓位固定列 CSV |
 | `broker` | BacktestOrderClient、TradingServiceClient（WS 下单/回报/K线/历史多命令通道+重连）、脚本化 mock（K线回放/get_klines）、exchange_orders.csv |
 | `data` | KlineClient 端口（live 实现在 `app/src/ts_kline.rs`，走 trading-service）、Feed（1m 增量聚合）、CSV 存储、live 预热、归档下载 |
-| `strategies` | 策略插件（6 个模板，见 `docs/strategy/EXAMPLES.md`），build.rs 自动发现注册，**新增策略只需加文件** |
+| `strategies` | 策略插件（2 个模板，见 `docs/strategy/EXAMPLES.md`），build.rs 自动发现注册，**新增策略只需加文件** |
 | `app` | 回测引擎、RuntimeActor、OrderRouter、bootstrap、配置、CLI、result.json/PNG 报告 |
 
 ## 状态机

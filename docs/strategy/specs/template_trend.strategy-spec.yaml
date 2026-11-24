@@ -1,0 +1,40 @@
+strategy_name: template_trend
+rust_module: template_trend
+prefix: TEMPLATETREND
+market: crypto / futures
+direction: long/short
+timeframes: [15m, 1h]
+extra_timeframes: [1m, 1h, 1d]
+symbols: [BTCUSDT, CU]
+data_source:
+  dir: data/klines
+  note: "crypto 走 data/klines/1m/binance/...；期货走 data/klines/1m/SHFE/..."
+backtest:
+  start: "20260109"
+  end: "20260113"
+  initial_cash: 10000
+
+entry:
+  description: "逐标趋势：dual_ma 交叉 或 EMA 触发 + 趋势过滤"
+  conditions:
+    - "entry_mode=dual_ma：快慢 EMA 交叉事件（末根与前一踉比较）"
+    - "entry_mode=ema_trend：收盘上穿/下穿触发 EMA，且与 trend_tf 的 EMA 同向"
+    - "allow_short=false 时只接受多头信号"
+
+exit:
+  stop_loss: "stop_mode=percent：入场价 ±stop_loss_pct；stop_mode=atr：atr_stop_mult × ATR"
+  signal_reversal: "双均线反向交叉 / 趋势或触发线反向"
+  note: "exit_price_source=close|high_low 控制止损触碰判定"
+
+default_params:
+  entry_mode: ema_trend
+  trigger_ema: 60
+  trend_tf: ""
+  trend_ema: 60
+  stop_mode: atr
+  atr_period: 14
+  atr_stop_mult: 2.0
+
+config_files:
+  - config/tpl_trend_crypto/strategy.yaml
+  - config/tpl_trend_futures/strategy.yaml

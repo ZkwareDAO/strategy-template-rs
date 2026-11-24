@@ -233,7 +233,7 @@ impl AggregationState {
     /// 喂入一根**已闭合** 1m，返回本次新闭合的时间框架（升序，恒含 1m）。
     pub fn on_closed_1m(
         &mut self,
-        bar: Bar,
+        mut bar: Bar,
         policy: &dyn BarAggregationPolicy,
         session: &dyn SessionRules,
     ) -> Result<Vec<Timeframe>> {
@@ -244,6 +244,10 @@ impl AggregationState {
             }
         }
         self.watermark = Some(bar.open_time);
+        // 交易日元数据：与桶边界同源（SessionRules 是唯一权威定义），
+        // 期货夜盘归次日交易日，crypto 为 UTC 自然日。仅透传给策略/报表，
+        // 不参与排序与水位（主键仍是 open_time）。
+        bar.extensions.trading_day = Some(session.trading_day_of(bar.open_time));
 
         let mut newly = Vec::new();
         for tf in self.timeframes.clone() {
@@ -318,7 +322,17 @@ impl AggregationState {
         }
         let mut newly = Vec::new();
         for tf in self.timeframes.clone() {
-            if tf != Timeframe::M1 && self.partials.contains_key(&tf) {
+            if tf == Timeframe::M1 {
+                continue;
+            }
+            // D1 只由「末窗末根 1m」或「交易日边界」闭合。午休/隔夜的会话
+            // 断开是日内事件；若在此切断 D1，同一交易日会被拆成两根
+            //（午休前 + 午休后），量被拆分且策略在午休时误收日线信号。
+            // crypto 的 UtcGridPolicy::closes_on_gap 恒 false，不会进入本循环。
+            if tf == Timeframe::D1 {
+                continue;
+            }
+            if self.partials.contains_key(&tf) {
                 self.finalize(tf, policy, &mut newly);
             }
         }
@@ -346,9 +360,11 @@ impl AggregationState {
         policy: &dyn BarAggregationPolicy,
         newly: &mut Vec<Timeframe>,
     ) {
-        let Some(p) = self.partials.remove(&tf) else {
+        let Some(mut p) = self.partials.remove(&tf) else {
             return;
         };
+        // 桶的交易日以 BucketId 为准（窗口可能跨自然日），覆盖首根 1m 写入的值。
+        p.bar.extensions.trading_day = Some(p.id.trading_day);
         let tainted = p.tainted && policy.drop_partial_head();
         if tainted {
             return;
@@ -843,6 +859,211 @@ mod tests {
                 .map(|b| b.start),
             Some(utc(2026, 1, 8, 5, 30)),
             "北京 14:00 归 13:30 起的另一根"
+        );
+    }
+
+    // ─── P0 回归：会话断开不得切断 D1 ───
+
+    fn futures_cu() -> InstrumentId {
+        InstrumentId::futures_contract(
+            &ExchangeId::new("SHFE"),
+            "CU",
+            crate::core::identity::ContractMonth {
+                year: 2026,
+                month: 1,
+            },
+        )
+    }
+
+    /// 喂一段连续 1m（close = 100 + 序号，便于核对 open/close）。
+    fn feed(st: &mut AggregationState, inst: &InstrumentId, start: DateTime<Utc>, n: i64) {
+        let policy = SessionWindowPolicy;
+        let session = cn_futures_default();
+        for i in 0..n {
+            st.on_closed_1m(
+                bar(inst, start + chrono::Duration::minutes(i), 100.0 + i as f64),
+                &policy,
+                &session,
+            )
+            .unwrap();
+        }
+    }
+
+    fn lunch_gap() -> SessionGap {
+        SessionGap {
+            from: utc(2026, 1, 5, 2, 15),
+            to: Some(utc(2026, 1, 5, 5, 30)),
+            reason: crate::core::session::GapReason::LunchBreak,
+            closes_bar: true,
+        }
+    }
+
+    /// 一个完整 CTP 交易日：周五夜盘 240 根 + 周一日盘 09:00-10:14 共 75 根
+    /// + 午休 gap + 周一下午 13:30-14:59 共 90 根。
+    fn full_ctp_day(st: &mut AggregationState, inst: &InstrumentId) {
+        feed(st, inst, utc(2026, 1, 2, 13, 0), 240);
+        feed(st, inst, utc(2026, 1, 5, 1, 0), 75);
+        st.on_gap(&lunch_gap(), &SessionWindowPolicy);
+        feed(st, inst, utc(2026, 1, 5, 5, 30), 90);
+    }
+
+    #[test]
+    fn lunch_gap_does_not_close_d1() {
+        let inst = futures_cu();
+        let mut st = AggregationState::new(&[Timeframe::M1, Timeframe::D1], 200);
+        feed(&mut st, &inst, utc(2026, 1, 2, 13, 0), 240);
+        feed(&mut st, &inst, utc(2026, 1, 5, 1, 0), 75);
+
+        let closed = st.on_gap(&lunch_gap(), &SessionWindowPolicy);
+        assert!(closed.is_empty(), "午休 gap 不得收 D1");
+        assert!(
+            st.closed(Timeframe::D1).is_empty(),
+            "午休时 D1 尚未收线"
+        );
+
+        feed(&mut st, &inst, utc(2026, 1, 5, 5, 30), 90);
+        let d1 = st.closed(Timeframe::D1);
+        assert_eq!(d1.len(), 1, "一个交易日必须只有一根 D1");
+        assert_eq!(
+            d1[0].open_time,
+            utc(2026, 1, 2, 13, 0),
+            "D1 起点 = 交易日夜盘开盘（周五 21:00 北京）"
+        );
+        assert_eq!(d1[0].open, 100.0, "open = 夜盘首根");
+        assert_eq!(d1[0].close, 189.0, "close = 下午末根");
+        assert!((d1[0].volume - 405.0).abs() < 1e-9, "量含夜盘+上午+下午");
+    }
+
+    #[test]
+    fn lunch_gap_still_closes_h1_and_h4() {
+        let inst = futures_cu();
+        let mut st = AggregationState::new(
+            &[Timeframe::M1, Timeframe::H1, Timeframe(240), Timeframe::D1],
+            200,
+        );
+        feed(&mut st, &inst, utc(2026, 1, 2, 13, 0), 240);
+        feed(&mut st, &inst, utc(2026, 1, 5, 1, 0), 75);
+
+        // 夜盘 H1 四根 + 上午 H1 两根（09:00 完整、10:00 被 gap 截断）
+        assert_eq!(st.closed(Timeframe::H1).len(), 6, "午休前 H1");
+        // 夜盘 4h 一根 + 上午 4h 一根（被 10:15 窗口右端截断）
+        assert_eq!(st.closed(Timeframe(240)).len(), 2, "午休前 H4");
+        assert!(st.closed(Timeframe::D1).is_empty(), "D1 尚未收线");
+
+        let closed = st.on_gap(&lunch_gap(), &SessionWindowPolicy);
+        assert!(
+            closed.is_empty(),
+            "H1/H4 已在窗口右端正常收线，gap 无待收桶"
+        );
+        assert_eq!(st.closed(Timeframe::H1).len(), 6);
+        assert_eq!(st.closed(Timeframe(240)).len(), 2);
+        assert!(st.closed(Timeframe::D1).is_empty(), "D1 不得被 gap 切断");
+
+        feed(&mut st, &inst, utc(2026, 1, 5, 5, 30), 90);
+        assert_eq!(st.closed(Timeframe::H1).len(), 8, "午后 H1 两根");
+        assert_eq!(st.closed(Timeframe(240)).len(), 3, "午后 H4 一根");
+        assert_eq!(st.closed(Timeframe::D1).len(), 1);
+    }
+
+    #[test]
+    fn overnight_gap_then_day_boundary_opens_next_d1() {
+        let inst = futures_cu();
+        let mut st = AggregationState::new(&[Timeframe::M1, Timeframe::D1], 200);
+        full_ctp_day(&mut st, &inst);
+        assert_eq!(st.closed(Timeframe::D1).len(), 1);
+
+        let overnight = SessionGap {
+            from: utc(2026, 1, 5, 7, 0),
+            to: Some(utc(2026, 1, 5, 13, 0)),
+            reason: crate::core::session::GapReason::Overnight,
+            closes_bar: true,
+        };
+        assert!(st.on_gap(&overnight, &SessionWindowPolicy).is_empty());
+        assert_eq!(
+            st.on_day_boundary(&SessionWindowPolicy).len(),
+            0,
+            "D1 已由末窗收线，日界不应重复收"
+        );
+        // 周二交易日夜盘首根（周一 21:00 北京）→ 新 D1 桶，但尚未收线
+        feed(&mut st, &inst, utc(2026, 1, 5, 13, 0), 1);
+        assert_eq!(st.closed(Timeframe::D1).len(), 1, "次日 D1 需满一日才收");
+    }
+
+    #[test]
+    fn d1_head_bucket_still_dropped_when_ingested_mid_day_across_gap() {
+        let inst = futures_cu();
+        let mut st = AggregationState::new(&[Timeframe::M1, Timeframe::D1], 200);
+        // 从周一 10:00 中途接入（缺夜盘与上午前段）→ 首桶残缺
+        feed(&mut st, &inst, utc(2026, 1, 5, 2, 0), 15);
+        st.on_gap(&lunch_gap(), &SessionWindowPolicy);
+        feed(&mut st, &inst, utc(2026, 1, 5, 5, 30), 90);
+        assert!(
+            st.closed(Timeframe::D1).is_empty(),
+            "中途接入的首桶不得当完整日线喂给策略"
+        );
+    }
+
+    #[test]
+    fn crypto_gap_behaviour_unchanged() {
+        let inst = InstrumentId::perpetual(&ExchangeId::new("binance"), "BTCUSDT");
+        let session = ContinuousSession::default();
+        let mut st = AggregationState::new(&[Timeframe::M1, Timeframe::H1, Timeframe::D1], 200);
+        for i in 0..1440 {
+            st.on_closed_1m(
+                bar(&inst, utc(2026, 1, 5, 0, 0) + chrono::Duration::minutes(i), 100.0),
+                &UtcGridPolicy,
+                &session,
+            )
+            .unwrap();
+        }
+        let h1 = st.closed(Timeframe::H1).len();
+        let d1 = st.closed(Timeframe::D1).len();
+        let closed = st.on_gap(&lunch_gap(), &UtcGridPolicy);
+        assert!(closed.is_empty(), "crypto 的 UtcGridPolicy 不随 gap 断桶");
+        assert_eq!(st.closed(Timeframe::H1).len(), h1);
+        assert_eq!(st.closed(Timeframe::D1).len(), d1);
+    }
+
+    // ─── P1：交易日元数据 ───
+
+    #[test]
+    fn d1_carries_trading_day() {
+        let inst = futures_cu();
+        let mut st = AggregationState::new(&[Timeframe::M1, Timeframe::D1], 200);
+        full_ctp_day(&mut st, &inst);
+
+        let d1 = st.closed(Timeframe::D1);
+        assert_eq!(d1.len(), 1);
+        let monday = TradingDay(chrono::NaiveDate::from_ymd_opt(2026, 1, 5).unwrap());
+        assert_eq!(
+            d1[0].extensions.trading_day,
+            Some(monday),
+            "D1 必须携带交易日（周五夜盘归周一）"
+        );
+        // 夜盘 1m 也归属该交易日，而不是自然日 1/2
+        let first_m1 = st.closed(Timeframe::M1).front().expect("夜盘首根");
+        assert_eq!(first_m1.extensions.trading_day, Some(monday));
+    }
+
+    #[test]
+    fn crypto_d1_trading_day_is_utc_date() {
+        let inst = InstrumentId::perpetual(&ExchangeId::new("binance"), "BTCUSDT");
+        let session = ContinuousSession::default();
+        let mut st = AggregationState::new(&[Timeframe::M1, Timeframe::D1], 200);
+        for i in 0..1440 {
+            st.on_closed_1m(
+                bar(&inst, utc(2026, 1, 5, 0, 0) + chrono::Duration::minutes(i), 100.0),
+                &UtcGridPolicy,
+                &session,
+            )
+            .unwrap();
+        }
+        let d1 = st.closed(Timeframe::D1);
+        assert_eq!(d1.len(), 1);
+        assert_eq!(
+            d1[0].extensions.trading_day,
+            Some(TradingDay(chrono::NaiveDate::from_ymd_opt(2026, 1, 5).unwrap())),
+            "crypto 交易日 = UTC 自然日"
         );
     }
 }

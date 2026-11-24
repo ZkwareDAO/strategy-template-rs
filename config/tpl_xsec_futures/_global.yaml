@@ -1,4 +1,4 @@
-# ctp_multi_xsec 组基线：组合总额 200 万，按标的等分起账。
+# template_xsec 组基线（期货横截面）
 mode: paper_trading
 warmup_days: 60
 initial_cash: 2000000

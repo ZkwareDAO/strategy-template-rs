@@ -74,12 +74,12 @@
 
 ## 4. 同一策略跑两个市场
 
-`example_dual_ma` 同时提供 crypto 与 CU 两份配置，策略代码完全不改：
+`template_trend` 同时提供 crypto 与 CU 两份配置，策略代码完全不改：
 
 | 文件 | `universe` | base TF | `_global.yaml` 关键项 |
 |---|---|---|---|
-| `config/example_dual_ma/strategy.yaml` | `{BTCUSDT, binance}` | 4h | `cash: 200`（USDT 单笔名义） |
-| `config/example_dual_ma_cu/strategy.yaml` | `{CU, SHFE}` | 1h | `cash: 1000`、`initial_cash: 1000000`（元） |
+| `config/tpl_trend_crypto/strategy.yaml` | `{BTCUSDT, binance}` | 1h | `cash: 200`（USDT 单笔名义） |
+| `config/tpl_trend_futures/strategy.yaml` | `{CU, SHFE}` | 15m | `initial_cash: 1000000`（元） |
 
 差异全部落在配置与 `config/contracts.yaml`：
 
@@ -116,7 +116,7 @@ contracts:
 - 1m 数据落位：
   - crypto：`data/klines/1m/binance/crypto_perpetual/BTCUSDT_1m.csv`
   - 期货：`data/klines/1m/SHFE/cn_futures/CU_1m.csv`（主力连续需先 `roll_build` 生成）
-- crypto 与期货的配置应分目录（如 `example_dual_ma/` 与 `example_dual_ma_cu/`）；
+- crypto 与期货的配置应分目录（如 `template_trend/` 与 `template_trend_cu/`）；
   同一目录内的每个文件只认自己的 `exchange`，不再从兄弟文件继承。
 
 ## 5.1 期货回测前置：K 线位置必须由用户提供

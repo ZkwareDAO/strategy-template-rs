@@ -56,14 +56,14 @@ cargo run -p strategy-app -- run --config config
 
 每个 `config/{strategy}/{SYMBOL}.yaml` 的 `mode` **各自独立生效**；**文件名即标的身份**
 （目录模式按 `{SYMBOL}.yaml` 认领，见 §7.1 末注）。历史样例已迁移为
-`config/example_dual_ma/strategy.yaml`，per-symbol 样例不再随仓库提供。
+`config/tpl_trend_crypto/strategy.yaml`，per-symbol 样例不再随仓库提供。
 
 历史格式示例（现已不可直接运行）：
 
 ```yaml
-# config/example_dual_ma/BTCUSDT.yaml
+# config/tpl_trend_crypto/BTCUSDT.yaml
 mode: live            # 真单通道（TradingGateway）
-# config/example_dual_ma/WLDUSDT.yaml
+# config/tpl_trend_crypto/WLDUSDT.yaml
 mode: paper_trading   # 本地撮合（BacktestOrderClient，产出仓位五件套）
 ```
 
@@ -85,8 +85,8 @@ mode: paper_trading   # 本地撮合（BacktestOrderClient，产出仓位五件�
 
 ```
 运行实例 mode 一览：
-  BTCUSDT   example_dual_ma → live
-  WLDUSDT   example_dual_ma → paper_trading
+  BTCUSDT   template_trend → live
+  WLDUSDT   template_trend → paper_trading
 ```
 
 **紧急熔断**：`services.trading.submit_enabled: false` 时**所有** live 也不发单。
@@ -258,10 +258,10 @@ klines-service 已退役，契约归档 `docs/archive/kline-service.md`）。
 
 ```bash
 # 期货示例（CU，统一端口 strategy.yaml，CTP 时段聚合）
-cargo run -p strategy-app -- backtest --config config/example_dual_ma_cu/strategy.yaml \
+cargo run -p strategy-app -- backtest --config config/tpl_trend_futures/strategy.yaml \
   --start 20260101 --end 20260630 --data-dir data/klines --output-dir reports
 
-cargo run -p strategy-app -- run --config config/example_dual_ma_cu/strategy.yaml
+cargo run -p strategy-app -- run --config config/tpl_trend_futures/strategy.yaml
 ```
 
 > ⚠️ klines-service 退役（2026-11-10）后，旧 `services.kline` 节（含 `market`
@@ -284,8 +284,8 @@ cargo run -p strategy-app -- run --config config/example_dual_ma_cu/strategy.yam
 > - 目录里**没有**该标的的文件 ⇒ **拒绝启动**并列出可用标的，不再静默套用别人的交易所。
 >   （单文件模式不受此限：没有兄弟文件就没有污染，`--symbol` 复用模板照旧合法。）
 > - 标的身份 = **文件名**（`{strategy}/{SYMBOL}.yaml`）。历史 per-symbol 样例曾是
->   `config/example_dual_ma/BTCUSDT.yaml`（crypto）与 `.../CU.yaml`（期货）；当前样例已
->   迁移为 `config/example_dual_ma/strategy.yaml` 与 `config/example_dual_ma_cu/strategy.yaml`
+>   `config/tpl_trend_crypto/BTCUSDT.yaml`（crypto）与 `.../CU.yaml`（期货）；当前样例已
+>   迁移为 `config/tpl_trend_crypto/strategy.yaml` 与 `config/tpl_trend_futures/strategy.yaml`
 >   （分目录，互不干扰）。
 > - 文件名不便表达标的时，可在该文件顶层写 `symbol: BTCUSDT` 显式声明身份；
 >   与文件名不一致会打 `WARN`（复制模板忘了改时就是这条）。
@@ -354,10 +354,10 @@ cargo run -p strategy-data --bin roll_build -- \
 
 ```bash
 # paper（本地撮合，无网关）
-cargo run -p strategy-app -- run --config config/xsec_momentum/strategy.yaml \
+cargo run -p strategy-app -- run --config config/tpl_xsec_crypto/strategy.yaml \
   --mode paper_trading --data-dir ./data/klines --output-dir ./out
 # live（需 _global.yaml 配真实 services.trading；紧急停单用 submit_enabled: false）
-cargo run -p strategy-app -- run --config config/xsec_momentum/strategy.yaml --mode live
+cargo run -p strategy-app -- run --config config/tpl_xsec_crypto/strategy.yaml --mode live
 ```
 
 ### 5.2 mock 演练（隔离 cwd；先 dry 再上 live）

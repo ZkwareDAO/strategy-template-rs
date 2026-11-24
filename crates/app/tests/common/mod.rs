@@ -60,7 +60,7 @@ fn session_minutes(day: NaiveDate) -> Vec<NaiveDateTime> {
 /// 生成 `days` 个连续自然日的 CTP 形态 1m 序列（升序、无重复）。
 ///
 /// 价格：围绕 CU 量级（~7.8 万元/吨）的确定性正弦叠加，
-/// 振幅约 ±0.9%（远小于 example_dual_ma 的 2% 初始止损，止损不在本 fixture 触发），
+/// 振幅约 ±0.9%（远小于 template_trend 的 2% 初始止损，止损不在本 fixture 触发），
 /// 按**交易分钟序号**而非墙钟驱动，因此时段缺口不改变价格形态。
 pub fn synthetic_ctp_1m(days: i64) -> Vec<Candle> {
     let mut times: Vec<DateTime<Utc>> = Vec::new();
