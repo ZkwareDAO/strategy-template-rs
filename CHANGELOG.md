@@ -6,10 +6,17 @@
 
 ## [Unreleased]
 
+### Changed — 横截面策略改为多空模板 `template_xsec_ls`
+
+- 删除 `crates/strategies/src/template_xsec.rs`（只多）与 `config/tpl_xsec_crypto/`；新增 `template_xsec_ls`：前 `top_k` 做多、后 `bottom_k` 做空，方向化趋势过滤与对称止损。
+- `config/tpl_xsec_futures/` 改为 5 个 SHFE 品种（RB/I/FU/BU/SP）、`top_k=2`/`bottom_k=3`、多空各占一半预算。
+- 引擎配置校验放开 `rebalance.bottom_k`（仅保留 `bottom_k <= universe` 上限）；同轮多↔空反手仍由策略侧 `Close`+`Open` 两段式完成。
+- 测试同步：新增多空开仓、反手两段式与配置装配断言；旧 crypto 横截面样例从矩阵测试移除。
+
 ### Changed — 模板策略合并（6→2）与配置精简
 
-- `crates/strategies/src/` 只保留两个模板：`template_trend`（逐标：EMA 交叉/趋势过滤 + 百分比或 ATR 止损）与 `template_xsec`（横截面：参数化排名 + 趋势过滤 + 等权调仓，N=1 退化为单标）；原 6 个模板删除，测试夹具与断言同步迁移。
-- 配置目录 8 → 4：`config/tpl_trend_crypto`、`config/tpl_trend_futures`、`config/tpl_xsec_crypto`、`config/tpl_xsec_futures`。
+- `crates/strategies/src/` 只保留两个模板：`template_trend`（逐标：EMA 交叉/趋势过滤 + 百分比或 ATR 止损）与 `template_xsec`（横截面只多：参数化排名 + 趋势过滤 + 等权调仓，N=1 退化为单标）；原 6 个模板删除，测试夹具与断言同步迁移。该只多模板随后被多空模板 `template_xsec_ls` 替换（见上方 Unreleased 条目）。
+- 配置目录 8 → 3：`config/tpl_trend_crypto`、`config/tpl_trend_futures`、`config/tpl_xsec_futures`（旧 `config/tpl_xsec_crypto` 在替换多空模板时删除）。
 - 大周期 CSV 导出增加可选 `trading_day` 列；报表日线与图表按交易所交易日标注（期货夜盘归次日，crypto 为 UTC 自然日）。
 - 期货 D1 聚合修复：午休/隔夜 `SessionGap` 不再切断 D1，一个交易日只产出一根日线。
 

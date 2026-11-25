@@ -118,17 +118,20 @@ exit:
 | `trailing.arm_pnl_pct` | 浮盈达到该百分比后武装回落止盈；必须 > 0 |
 | `trailing.giveback_pct` | 从峰值回吐该百分比触发全平；`(0,100]` |
 
-策略自设的 `Open.stop_price` 是第一道标的级止损，`portfolio_exit` 是组合级兜底，两者层级不同。
+策略自设的 `Open.stop_price` 是第一道标的级止损（横截面运行时不自动触发，模板逐 bar
+判 `low/high` 后发 `Close{is_stop_loss:true}`）；`portfolio_exit` 是组合级兜底，两者层级不同。
 
 ### 2.6 rebalance（仅多标合并总仓）
 
 ```yaml
-rebalance: { every_bars: 12, top_k: 2, bottom_k: 0, weight_scheme: equal }
+rebalance: { every_bars: 12, top_k: 2, bottom_k: 3, weight_scheme: equal }
 ```
 
 - `every_bars` 是 base TF 的根数；`> 0`。
-- `top_k` 必须 `> 0` 且 ≤ universe 数；`params.top_k` 应与它同值。
-- `bottom_k` 本期必须为 `0`（空头侧未实现）。
+- `top_k` 必须 `> 0`；`bottom_k` 可为 `0..universe`；`params.top_k`/`params.bottom_k`
+  应与它们同值。
+- `bottom_k = 0` 只做多；`bottom_k > 0` 前 `top_k` 做多、后 `bottom_k` 做空，
+  两侧各占 `risk.max_total_notional` 的一半预算。
 - `weight_scheme` 仅 `equal`。
 - 只有 `merge_positions=true` 的 N≥2 才要求 `rebalance`；逐标的独立总仓不需要。
 
@@ -169,7 +172,7 @@ target_qty = weight * max_total_notional * nav / (price * multiplier)
 | `引用了未声明指标` | 规则 `ind` 未在 `indicators` 声明 |
 | `macd_cross 文本值只允许 bullish|bearish` | 文本值写错 |
 | `必须配置 rebalance` | N≥2 且 `merge_positions=true` 但没写调仓 |
-| `bottom_k 本期未实现` | `bottom_k != 0` |
+| `bottom_k 超过 universe` | `bottom_k` > universe 数 |
 | `sizing 有效单仓比例...超过 risk.max_total_notional` | 仓位预算超总预算 |
 | `strategy_id 重复` | 配置集内 `strategy_id` 冲突 |
 | `混合 exchange` / `duplicate symbol` | universe 跨交易所或标的重复 |
@@ -219,7 +222,7 @@ target_qty = weight * max_total_notional * nav / (price * multiplier)
 | 决策 | 空仓 + 门控通过即开仓 | 仅 `rebalance_due` 时排名/等权调仓 |
 | 出场 | 策略/配置逐标的触发 | 掉出 top_k 调回 0；组合级用 `CloseMaster`；`portfolio_exit` 兜底 |
 | `merge=false` | 无意义 | 每标的总仓独立，不需要 `rebalance`；容量校验按 1 个 slot |
-| 期货形态 | `template_trend`（1:1） | `template_xsec`（1:N，`merge=true`） |
+| 期货形态 | `template_trend`（1:1） | `template_xsec_ls`（1:N，`merge=true`） |
 
 升级路径：同一份策略代码，`universe` 加一行 + 补 `rebalance` + `params.top_k` 同值，
 即从单标切横截面；不需要改注册或其他文件。
@@ -227,9 +230,10 @@ target_qty = weight * max_total_notional * nav / (price * multiplier)
 ### 5.1 策略代码里的单标/多标分支
 
 - 直接实现 port 的模板看 `snapshots.len()`：`1` 走单标分支，`> 1` 走横截面分支。
-  `template_xsec.rs` 同时演示两条路径；`template_trend.rs` 只走单标。
+  `template_xsec_ls.rs` 同时演示两条路径；`template_trend.rs` 只走单标。
 - `StrategyBase` 自动分流：单标忽略 `rebalance_due`，横截面只在 `rebalance_due`
   时排名；策略只实现 `score/entry_allowed/stop`，不要在钩子里判断标的数量。
+  `StrategyBase` 当前只发多单；双端多空请直接实现 port（参考 `template_xsec_ls.rs`）。
 - 用户的 alpha 逻辑应写成市场无关形式：单标是多标的 N=1 特例，
   同一份打分/入场函数不应出现“单标用 A、多标用 B”的分叉。
 - 多标的掉出 `top_k` 由模板调 `Adjust{0}`；`stale`/缺特征时保持仓位，
@@ -287,43 +291,45 @@ target_qty = weight * max_total_notional * nav / (price * multiplier)
 回测前必须有真实 1m 数据，位置与造数命令见
 [AI_WORKFLOW.md](AI_WORKFLOW.md) §4；没有数据不得回测。
 
-## 7. 四种形态与库内样例
+## 7. 三种形态与库内样例
 
 | 形态 | 样例配置 | 关键点 |
 |---|---|---|
 | crypto 单标 | `config/tpl_trend_crypto/strategy.yaml` | N=1、无 `rebalance`、`sizing.per_position_pct=1.0` |
-| crypto 多标 | `config/tpl_xsec_crypto/strategy.yaml` | N=2、`rebalance.top_k=2`、`sizing.per_position_pct=0.10`、`risk.max_total_notional=0.80` |
 | 期货单标 | `config/tpl_trend_futures/strategy.yaml` | `CU/SHFE`、`timeframes [15m,1h]`、组内 `initial_cash` |
-| 期货多标 | `config/tpl_xsec_futures/strategy.yaml` | `merge_positions:true`、N=3、`rebalance.top_k=2` |
+| 期货多空 | `config/tpl_xsec_futures/strategy.yaml` | `merge_positions:true`、5 品种、`top_k=2`/`bottom_k=3`、`per_position_pct=0.2`、`max_total_notional=1.0` |
 
-最小可抄骨架（crypto 多标，`params` 对齐 `template_xsec`；删注释即能跑）：
+最小可抄骨架（期货多空，`params` 对齐 `template_xsec_ls`；删注释即能跑）：
 
 ```yaml
 strategy_type: my_strategy
 strategy_id: my_strategy:default
 universe:
-  - BTCUSDT
-  - ETHUSDT
+  - { symbol: RB, exchange: SHFE }
+  - { symbol: I,  exchange: SHFE }
+  - { symbol: FU, exchange: SHFE }
+  - { symbol: BU, exchange: SHFE }
+  - { symbol: SP, exchange: SHFE }
 timeframes: [15m, 1h]
 indicators:
   macd: { tf: 1h, fast: 12, slow: 26, signal: 9 }
 entry:  { default: [] }
 exit:   { default: [] }
 portfolio_exit: { stop_loss_pct: 8 }
-rebalance: { every_bars: 96, top_k: 1, bottom_k: 0, weight_scheme: equal }
-risk:   { max_total_notional: 0.80 }
-sizing: { per_position_pct: 0.40 }
-params: { rank_indicator: macd, higher_is_better: true, top_k: 1 }
+rebalance: { every_bars: 12, top_k: 2, bottom_k: 3, weight_scheme: equal }
+risk:   { max_total_notional: 1.0 }
+sizing: { per_position_pct: 0.20 }
+params: { rank_indicator: macd, higher_is_better: true, top_k: 2, bottom_k: 3, trend_tf: "1h" }
 ```
 
 对应的 `_global.yaml`（同目录）：
 
 ```yaml
 mode: paper_trading
-warmup_days: 30
-cash: 200.0
+warmup_days: 60
+initial_cash: 2000000
 services:
-  trading: { exchange: binance, account: demo }
+  trading: { exchange: SHFE, account: ctp-demo }
 ```
 
 ## 8. 常见错误

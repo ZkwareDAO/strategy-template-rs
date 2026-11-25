@@ -25,7 +25,7 @@ fn all_entries_factory_matches_name_and_metadata() {
     }
 
     let names: Vec<&str> = registry::all().iter().map(|e| e.name).collect();
-    for expected in ["template_trend", "template_xsec"] {
+    for expected in ["template_trend", "template_xsec_ls"] {
         assert!(
             names.contains(&expected),
             "缺少注册项 {expected}: {names:?}"
@@ -40,6 +40,6 @@ fn unknown_strategy_lists_all_registered_names() {
         Err(e) => e.to_string(),
     };
     assert!(err.contains("未知策略: nope"), "{err}");
-    assert!(err.contains("template_xsec"), "{err}");
+    assert!(err.contains("template_xsec_ls"), "{err}");
     assert!(err.contains("template_trend"), "{err}");
 }

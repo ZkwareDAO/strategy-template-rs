@@ -1,0 +1,42 @@
+strategy_name: template_xsec_ls
+rust_module: template_xsec_ls
+prefix: TEMPLATEXSECLS
+market: futures
+direction: long_short
+timeframes: [15m, 1h]
+extra_timeframes: [1m, 1h]
+symbols: [RB, I, FU, BU, SP]
+data_source:
+  dir: data/klines
+  note: "期货走 data/klines/1m/SHFE/...；crypto 走 data/klines/1m/binance/..."
+backtest:
+  start: "20260609"
+  end: "20260613"
+  initial_cash: 2000000
+
+entry:
+  description: "多空横截面：分数前 top_k 做多、后 bottom_k 做空；N=1 按趋势方向单标"
+  conditions:
+    - "rebalance_due 或 flat_entry 且空仓"
+    - "候选 !stale、entry_eligible、rank_indicator 有值"
+    - "trend_tf 非空时方向化过滤：多头收盘 > EMA，空头收盘 < EMA"
+    - "多头取分数高端，空头取分数低端并排除已选多头"
+    - "higher_is_better 控制“更好”方向，tie-break 按 namespaced_key"
+
+exit:
+  stop_loss: "方向化：多头 stop < price，空头 stop > price；stop_mode=percent 或 atr"
+  signal_reversal: "掉出选中集合 → Adjust{0}；跨侧反向 → 调仓轮 Close+Open（引擎 Phase1/Phase2）"
+  note: "不产生普通 Close；组合级退出走 portfolio_exit/CloseMaster"
+
+default_params:
+  rank_indicator: macd
+  higher_is_better: true
+  top_k: 2
+  bottom_k: 0
+  flat_entry: true
+  trend_tf: ""
+  stop_mode: percent
+  stop_loss_pct: 2.0
+
+config_files:
+  - config/tpl_xsec_futures/strategy.yaml

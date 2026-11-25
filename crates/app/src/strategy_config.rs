@@ -534,7 +534,7 @@ mod venue_qty_tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
             dir.path().join("strategy.yaml"),
-            "strategy_type: template_xsec\nstrategy_id: template_xsec:test\n\
+            "strategy_type: template_xsec_ls\nstrategy_id: template_xsec_ls:test\n\
              warmup_days: 1\nuniverse: [BTCUSDT]\ntimeframes: [1m]\n\
              indicators:\n  adx: { tf: 1m, period: 14 }\n  macd: { tf: 1m, fast: 12, slow: 26, signal: 9 }\n\
              entry: { default: [] }\nexit: { default: [] }\n\
@@ -571,7 +571,7 @@ mod venue_qty_tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
             dir.path().join("strategy.yaml"),
-            "strategy_type: template_xsec\nstrategy_id: template_xsec:test\n\
+            "strategy_type: template_xsec_ls\nstrategy_id: template_xsec_ls:test\n\
              warmup_days: 1\nuniverse: [BTCUSDT, ETHUSDT]\ntimeframes: [1m]\n\
              indicators:\n  adx: { tf: 1m, period: 14 }\n  macd: { tf: 1m, fast: 12, slow: 26, signal: 9 }\n\
              entry: { default: [] }\nexit: { default: [] }\n\

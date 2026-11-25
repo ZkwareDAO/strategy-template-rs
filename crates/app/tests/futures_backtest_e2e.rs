@@ -31,17 +31,23 @@ fn find_file(root: &Path, name: &str) -> Option<PathBuf> {
     dirs.into_iter().find_map(|d| find_file(&d, name))
 }
 
-/// 按目标价格量级缩放合成 CU 形态 1m（仅测试用：品种价格水平影响手数取整）。
-fn scaled_ctp_1m(days: i64, base: f64) -> Vec<Candle> {
-    let factor = base / 78_000.0;
+/// 按目标价格量级生成合成 1m：不同品种加相位差，横截面排名才有上下之分。
+fn phased_ctp_1m(days: i64, base: f64, phase: f64) -> Vec<Candle> {
     synthetic_ctp_1m(days)
         .into_iter()
-        .map(|c| Candle {
-            open: c.open * factor,
-            high: c.high * factor,
-            low: c.low * factor,
-            close: c.close * factor,
-            ..c
+        .enumerate()
+        .map(|(k, c)| {
+            let k = k as f64;
+            let v = base
+                + base * 0.0064 * (2.0 * std::f64::consts::PI * k / 600.0 + phase).sin()
+                + base * 0.00256 * (2.0 * std::f64::consts::PI * k / 137.0 + phase * 2.0).sin();
+            Candle {
+                open: v,
+                high: v + base * 0.00008,
+                low: v - base * 0.00008,
+                close: v,
+                ..c
+            }
         })
         .collect()
 }
@@ -64,11 +70,11 @@ fn stage_config(tmp: &Path, group: &str) -> PathBuf {
 fn seed_klines(cfg: &Path, data_dir: &Path, base_prices: &[(&str, f64)]) {
     let spec = strategy_app::strategy_config::load_strategy(cfg).expect("样例配置应可加载");
     assert_eq!(spec.instruments.len(), base_prices.len(), "universe 行数");
-    for (ispec, &(symbol, base)) in spec.instruments.iter().zip(base_prices) {
+    for (i, (ispec, &(symbol, base))) in spec.instruments.iter().zip(base_prices).enumerate() {
         assert_eq!(ispec.symbol, symbol);
         csv_store::save_csv(
             csv_store::csv_path(data_dir, &ispec.venue_key, Timeframe::M1),
-            &scaled_ctp_1m(16, base),
+            &phased_ctp_1m(16, base, i as f64 * 1.2),
         )
         .unwrap_or_else(|e| panic!("写入 {symbol} 合成 1m 失败: {e}"));
     }
@@ -146,7 +152,13 @@ fn futures_xsec_trend_cli_backtest_end_to_end() {
     seed_klines(
         &cfg,
         &data_dir,
-        &[("RB", 3_500.0), ("I", 800.0), ("CU", 78_000.0)],
+        &[
+            ("RB", 3_500.0),
+            ("I", 800.0),
+            ("FU", 3_200.0),
+            ("BU", 3_800.0),
+            ("SP", 5_500.0),
+        ],
     );
     let out_dir = tmp.path().join("out");
     run_backtest(&cfg, &data_dir, &out_dir);

@@ -25,7 +25,7 @@
 | 3 | **K 线位置** | **必需** | 见 §4。crypto 可下载；**期货没有自动下载，必须用户提供路径** |
 | 4 | 回测区间 | 必需 | `--start/--end`，格式 `YYYYMMDD`；区间内必须有 1m 数据 |
 | 5 | 初始权益 | 期货必需 | `initial_cash`（元）；必须够开至少 1 手 |
-| 6 | 策略方向 | 必需 | 只多 / 只空 / 多空；横截面轮换本期只做多（`bottom_k=0`），单标模板可自行实现空头 |
+| 6 | 策略方向 | 必需 | 只多 / 只空 / 多空；横截面多空用 `bottom_k` 指定空头端（0=只多），单标用 `allow_short` |
 | 7 | 指标与周期 | 必需 | 名称、参数、周期（如 `EMA20(4h)`）；必须落在指标白名单 |
 | 8 | 入场条件 | 必需 | 可判定布尔条件，逐条列；多条件默认 AND |
 | 9 | 出场/止损 | 必需 | 止损方式与阈值；止盈/反向出场；无止损必须显式说明 |
@@ -60,8 +60,8 @@
 │   ├─ crypto → 复制 template_trend.rs（直接 port，最小）
 │   └─ futures → 复制 template_trend.rs（整数手 + 时段）
 └─ 多标 N>1
-    ├─ crypto → 复制 template_xsec.rs（直接 port 横截面）
-    └─ futures → 复制 template_xsec.rs（1:N + 乘数）
+    ├─ crypto → 复制 template_xsec_ls.rs（直接 port 横截面）
+    └─ futures → 复制 template_xsec_ls.rs（1:N + 乘数）
 ```
 
 也可以用 `common::StrategyBase` 只写五个钩子；当前 2 个模板都直接实现 port，

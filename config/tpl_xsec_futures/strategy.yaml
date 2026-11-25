@@ -1,12 +1,14 @@
-# template_xsec — 期货横截面：H1 趋势过滤 + ATR + 等权调仓（原 futures_xsec_trend 语义）
-strategy_type: template_xsec
-strategy_id: template_xsec:shfe
+# template_xsec_ls — 期货横截面多空：H1 趋势过滤 + ATR + 前 top_k 做多、后 bottom_k 做空
+strategy_type: template_xsec_ls
+strategy_id: template_xsec_ls:shfe
 merge_positions: true
 
 universe:
   - { symbol: RB, exchange: SHFE }
   - { symbol: I, exchange: SHFE }
-  - { symbol: CU, exchange: SHFE }
+  - { symbol: FU, exchange: SHFE }
+  - { symbol: BU, exchange: SHFE }
+  - { symbol: SP, exchange: SHFE }
 timeframes: [15m, 1h]
 
 indicators:
@@ -15,7 +17,7 @@ indicators:
 entry: { default: [] }
 exit: { default: [] }
 portfolio_exit: { trailing: null, stop_loss_pct: 8 }
-rebalance: { every_bars: 12, top_k: 2, bottom_k: 0, weight_scheme: equal }
+rebalance: { every_bars: 12, top_k: 2, bottom_k: 3, weight_scheme: equal }
 risk: { max_total_notional: 1.0 }
 sizing: { per_position_pct: 0.2 }
 
@@ -23,6 +25,7 @@ params:
   rank_indicator: macd
   higher_is_better: true
   top_k: 2
+  bottom_k: 3
   flat_entry: true
   trend_tf: "1h"
   trend_ema: 60

@@ -54,23 +54,23 @@ cp crates/strategies/src/template_trend.rs crates/strategies/src/my_strategy.rs
 
 模板策略（2 个，导读见 [`docs/strategy/EXAMPLES.md`](docs/strategy/EXAMPLES.md)）：
 - `template_trend`：逐标趋势（crypto 单标 / 期货单标，同一份代码）
-- `template_xsec`：横截面轮动（crypto N=2 / 期货 N=3，N=1 退化为单标）
+- `template_xsec_ls`：多空横截面（样例 5 个期货品种；前 `top_k` 做多、后 `bottom_k` 做空；N=1 退化为单标）
 
 ## 横截面策略（1 策略 → 1 总仓位 → N 子仓位；PR-1～PR-5，回测 + live/paper）
 
 所有策略（单标与横截面）实现同一个 `CrossSectionalStrategyPort`：从 universe=1 起步，
-`universe` 加一行代币即升级为横截面，无需改代码。
+`universe` 加一行标的即升级为横截面，无需改代码。
 
 ```bash
-# 配置 = 策略级单文件 config/<strategy>/strategy.yaml（样例 config/tpl_xsec_crypto/strategy.yaml）
+# 配置 = 策略级单文件 config/<strategy>/strategy.yaml（样例 config/tpl_xsec_futures/strategy.yaml）
 cargo run -p strategy-app -- backtest \
-  --config config/tpl_xsec_crypto/strategy.yaml \
+  --config config/tpl_xsec_futures/strategy.yaml \
   --start 20260101 --end 20260601 --data-dir ./data/klines
 ```
 
 - **开发指南**：[docs/strategy/XSEC_GUIDE.md](docs/strategy/XSEC_GUIDE.md)（模板
-  `crates/strategies/src/template_xsec.rs`、示例配置
-  `config/tpl_trend_crypto/strategy.yaml` 与 `config/tpl_xsec_crypto/strategy.yaml`）。
+  `crates/strategies/src/template_xsec_ls.rs`、示例配置
+  `config/tpl_trend_crypto/strategy.yaml` 与 `config/tpl_xsec_futures/strategy.yaml`）。
 - **schema**：`universe`（1 条字符串 = 单所默认；`{symbol, exchange}` 完整形）、
   `timeframes[0]` = base TF（决策节奏）、`indicators`（指标级 tf 绑定）、
   `entry`/`exit`（default + overrides，AND 纯函数）、`portfolio_exit`
@@ -78,7 +78,7 @@ cargo run -p strategy-app -- backtest \
   （两阶段：先减仓确认、后加仓）、`risk/sizing`（杠杆上限、per_position_pct）。
 - **新策略**：在 `crates/strategies/src/<name>.rs` 实现
   `strategy_engine::strategy::port::CrossSectionalStrategyPort`，文件尾
-  `register_strategy!` 自注册（模板 `template_trend` / `template_xsec`）；
+  `register_strategy!` 自注册（模板 `template_trend` / `template_xsec_ls`）；
   `build.rs` 自动发现，无需改其他文件。
 - **数据模型**：`SubPosition`/`StrategyPortfolio` 走统一 Store；`MasterPosition`
   为派生视图不落表；子仓位与信号 ID 统一用 `sub_` 命名空间。

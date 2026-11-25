@@ -10,8 +10,8 @@ use strategy_app::strategy_config::{
 
 fn base_yaml() -> String {
     r#"
-strategy_type: template_xsec
-strategy_id: template_xsec:default
+strategy_type: template_xsec_ls
+strategy_id: template_xsec_ls:default
 timeframes: [15m, 1h]
 indicators:
   adx: { tf: 15m, period: 14 }
@@ -59,7 +59,7 @@ fn parses_strategy_yaml_file_and_resolves_two_instruments() {
         spec.instruments[1].venue_key,
         "binance/crypto_perpetual/ETHUSDT"
     );
-    assert_eq!(spec.strategy_id, "template_xsec:default");
+    assert_eq!(spec.strategy_id, "template_xsec_ls:default");
     assert_eq!(
         spec.instruments[0].timeframe, "15m",
         "base TF = timeframes[0]"
@@ -168,7 +168,7 @@ fn n1_old_strategy_uses_unified_registry() {
     let tmp = tempfile::tempdir().unwrap();
     let body = base_yaml()
         .replace(
-            "strategy_type: template_xsec\nstrategy_id: template_xsec:default\n",
+            "strategy_type: template_xsec_ls\nstrategy_id: template_xsec_ls:default\n",
             "",
         )
         .replace(
@@ -202,7 +202,7 @@ fn n2_unknown_strategy_lists_all_registered() {
         "strategy.yaml",
         &format!(
             "strategy_type: nope\n{}{}",
-            base_yaml().replace("strategy_type: template_xsec\n", ""),
+            base_yaml().replace("strategy_type: template_xsec_ls\n", ""),
             universe("  - BTCUSDT\n  - ETHUSDT")
         ),
     );
@@ -211,7 +211,7 @@ fn n2_unknown_strategy_lists_all_registered() {
         Ok(_) => panic!("未知策略必须报错"),
         Err(e) => e.to_string(),
     };
-    assert!(err.contains("template_xsec"), "{err}");
+    assert!(err.contains("template_xsec_ls"), "{err}");
     assert!(err.contains("template_trend"), "{err}");
 }
 
@@ -304,7 +304,7 @@ fn set_group_yaml(strategy_id: &str, symbols: &str) -> String {
     format!(
         "{}{}",
         base_yaml().replace(
-            "strategy_id: template_xsec:default",
+            "strategy_id: template_xsec_ls:default",
             &format!("strategy_id: {strategy_id}")
         ),
         universe(symbols)
@@ -475,13 +475,13 @@ fn set_dir_follows_symlinked_group_directory() {
 }
 
 #[test]
-fn template_xsec_sample_config_loads_and_instantiates() {
+fn template_xsec_ls_sample_config_loads_and_instantiates() {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../config/tpl_xsec_crypto/strategy.yaml");
+        .join("../../config/tpl_xsec_futures/strategy.yaml");
     let spec = load_strategy(&path).expect("示例配置必须可加载");
-    assert_eq!(spec.strategy_type, "template_xsec");
-    assert_eq!(spec.strategy_id, "template_xsec:crypto");
-    assert_eq!(spec.instruments.len(), 2);
+    assert_eq!(spec.strategy_type, "template_xsec_ls");
+    assert_eq!(spec.strategy_id, "template_xsec_ls:shfe");
+    assert_eq!(spec.instruments.len(), 5);
     build_strategy(&spec).expect("模板必须已注册");
 }
 
@@ -489,11 +489,14 @@ fn template_xsec_sample_config_loads_and_instantiates() {
 fn tpl_trend_crypto_config_loads_without_rebalance() {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../config/tpl_trend_crypto/strategy.yaml");
-    let spec = load_strategy(&path).expect("单标配置必须可加载");
+    let spec = load_strategy(&path).expect("多标配置必须可加载");
     assert_eq!(spec.strategy_type, "template_trend");
-    assert_eq!(spec.strategy_id, "template_trend:btc");
-    assert_eq!(spec.instruments.len(), 1);
-    assert!(spec.config.rebalance.is_none(), "N=1 可不配 rebalance");
+    assert_eq!(spec.strategy_id, "template_trend:multi");
+    assert_eq!(spec.instruments.len(), 3);
+    assert!(
+        spec.config.rebalance.is_none(),
+        "merge_positions=false 的逐标的独立总仓可不配 rebalance"
+    );
     build_strategy(&spec).expect("模板必须已注册");
 }
 
@@ -514,7 +517,7 @@ fn every_repo_config_dir_loads_and_instantiates() {
         checked += 1;
     }
     assert!(
-        checked >= 4,
+        checked >= 3,
         "仓库样例配置目录过少（{checked}），扫描逻辑可能失效"
     );
 }
@@ -528,7 +531,7 @@ fn futures_templates_load_and_instantiate() {
         ),
         (
             "../../config/tpl_xsec_futures/strategy.yaml",
-            "template_xsec",
+            "template_xsec_ls",
         ),
     ] {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(rel);

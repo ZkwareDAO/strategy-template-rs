@@ -3150,7 +3150,7 @@ mod venue_qty_spec_tests {
         // 实盘数量口径必须与场所规格一致：解析 exchanges.specs 的 per-symbol
         // qty 步长，供执行端口 normalize，避免低于步长的差额发单被拒。
         let file = parse_config(
-            "exchanges:\n  binance:\n    symbols: [BTCUSDT]\n    specs:\n      BTCUSDT: {qty_step: 0.001, min_qty: 0.001, qty_precision: 3}\nsymbols:\n  - symbol: BTCUSDT\nstrategy: template_xsec\ntimeframe: 1m\ncash: 200\nmode: live\n",
+            "exchanges:\n  binance:\n    symbols: [BTCUSDT]\n    specs:\n      BTCUSDT: {qty_step: 0.001, min_qty: 0.001, qty_precision: 3}\nsymbols:\n  - symbol: BTCUSDT\nstrategy: template_xsec_ls\ntimeframe: 1m\ncash: 200\nmode: live\n",
         )
         .unwrap();
         let specs = resolve_run(&file, &[], None, None, None, None).unwrap();

@@ -363,8 +363,13 @@ pub fn validate_config(cfg: &StrategyConfig) -> Result<(), Vec<String>> {
         if reb.top_k == 0 {
             errs.push("rebalance.top_k 必须 > 0".into());
         }
-        if reb.bottom_k != 0 {
-            errs.push("rebalance.bottom_k 本期未实现（空头侧推迟），必须为 0".into());
+        // 空头端最多覆盖整个 universe；实际取数还会按可用候选裁剪。
+        if reb.bottom_k > cfg.universe.len() {
+            errs.push(format!(
+                "rebalance.bottom_k({}) 超过 universe({})",
+                reb.bottom_k,
+                cfg.universe.len()
+            ));
         }
     }
 
@@ -698,9 +703,12 @@ sizing: { per_position_pct: 0.10 }
     }
 
     #[test]
-    fn bottom_k_must_be_zero_this_milestone() {
+    fn bottom_k_is_allowed_but_must_fit_universe() {
         let mut cfg = doc_example();
         cfg.rebalance.as_mut().unwrap().bottom_k = 1;
+        assert!(validate_config(&cfg).is_ok(), "bottom_k=1 应被接受");
+
+        cfg.rebalance.as_mut().unwrap().bottom_k = cfg.universe.len() + 1;
         let err = validate_config(&cfg).unwrap_err().join("\n");
         assert!(err.contains("bottom_k"), "{err}");
     }

@@ -1,4 +1,4 @@
-# template_xsec 组基线（期货横截面）
+# template_xsec_ls 组基线（期货横截面多空）
 mode: paper_trading
 warmup_days: 60
 initial_cash: 2000000

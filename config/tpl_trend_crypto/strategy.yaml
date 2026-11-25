@@ -1,9 +1,12 @@
-# template_trend — crypto 单标：双均线交叉 + 百分比止损（原 example_dual_ma 语义）
+# template_trend — crypto 多标：双均线交叉 + 百分比止损（逐标的独立总仓）
 strategy_type: template_trend
-strategy_id: template_trend:btc
+strategy_id: template_trend:multi
+merge_positions: false
 
 universe:
   - BTCUSDT
+  - ETHUSDT
+  - SOLUSDT
 timeframes: [1h, 1m] # [0] = 决策周期
 
 indicators: {}

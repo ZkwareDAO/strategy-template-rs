@@ -7,7 +7,7 @@
 
 - **推荐**：用 `crates/strategies/src/common/mod.rs` 的 `StrategyBase` + `StrategyLogic`
   写 alpha 钩子（打分/入场过滤/止损），单标与横截面骨架由基类提供。
-- **直接实现 port**：复制 `crates/strategies/src/template_xsec.rs`，自己写双路径分支。
+- **直接实现 port**：复制 `crates/strategies/src/template_xsec_ls.rs`，自己写双路径分支。
 
 ## 1. 唯一策略接口
 
@@ -39,7 +39,7 @@ SPI 单标路径（`ExchangeRunner`）走同一 port：`PortStrategyBridge` 以�
   `xsec_` 前缀是历史命名，不是约定；模块路径统一是 `strategy_engine::strategy`。
 - **基类**：`common::StrategyBase` 已沉淀单标/横截面两条决策路径；策略文件只实现
   `StrategyLogic`（`name` / `top_k` / `score` / `entry_allowed` / `stop`）。
-- **模板**：`template_xsec` 是直接实现 port 的参考；复制为 `src/<name>.rs` 即可起步。
+- **模板**：`template_xsec_ls` 是直接实现 port 的参考；复制为 `src/<name>.rs` 即可起步。
 
 ## 3. 从零写策略
 
@@ -64,16 +64,19 @@ SPI 单标路径（`ExchangeRunner`）走同一 port：`PortStrategyBridge` 以�
 - `portfolio.master.state == Closing` 时直接返回空动作，不开仓/不加仓/不调仓。
 - 退出（止损/止盈/组合回撤）交给配置 `exit` / `portfolio_exit`，基类不产生 `Close`。
 
-参考实现：`template_xsec`（crypto 横截面）、`template_xsec`（期货 1:N）。
-两者都直接实现 port；`StrategyBase` 的通用行为由 `common/mod.rs` 与
+> `StrategyBase` 当前只发多单；需要双端排名（前 `top_k` 多、后 `bottom_k` 空）时
+> 直接实现 port，参考 `template_xsec_ls.rs`。
+
+参考实现：`template_xsec_ls`（期货多空横截面，N=1 退化为单标）。
+模板直接实现 port；`StrategyBase` 的通用行为由 `common/mod.rs` 与
 `crates/strategies/tests/strategy_base.rs` 定义，当前模板未附 `StrategyBase` 版策略文件。
 
-### 3.2 直接实现 port：复制 template_xsec
+### 3.2 直接实现 port：复制 template_xsec_ls
 
-复制 `crates/strategies/src/template_xsec.rs` 为 `src/<name>.rs`，按以下顺序改：
+复制 `crates/strategies/src/template_xsec_ls.rs` 为 `src/<name>.rs`，按以下顺序改：
 
 1. 改类型名与 `TemplateParams` 默认值（`rank_indicator` 默认 `"macd"`、`higher_is_better`
-   默认 `true`、`top_k` 默认 `3`）。
+   默认 `true`、`top_k` 默认 `2`、`bottom_k` 默认 `0`）。
 2. `snapshots.len() == 1` 分支 = 单标路径：不看 `rebalance_due`；空仓且
    `!stale && entry_eligible` 时开多；已有子仓持有；退出交给配置。
 3. `snapshots.len() > 1` 分支 = 横截面路径：仅 `rebalance_due` 时排名，保留前 `top_k`，
@@ -170,8 +173,8 @@ SPI 单标路径（`ExchangeRunner`）走同一 port：`PortStrategyBridge` 以�
 
 | 字段 | 说明 |
 |---|---|
-| `strategy_type` | 注册名，例如 `template_xsec` / `template_xsec` |
-| `strategy_id` | 组合 ID，例如 `template_xsec:default`；多组配置集内必须唯一 |
+| `strategy_type` | 注册名，例如 `template_xsec_ls` |
+| `strategy_id` | 组合 ID，例如 `template_xsec_ls:default`；多组配置集内必须唯一 |
 | `universe` | 标的列表；1 条字符串 = 单所默认，`{symbol, exchange}` 为完整形 |
 | `timeframes` | `timeframes[0]` = base TF（决策节奏） |
 | `indicators` | 指标级 tf 绑定；白名单 `adx/rsi/ema/sma/atr/macd` |
@@ -200,9 +203,13 @@ SPI 单标路径（`ExchangeRunner`）走同一 port：`PortStrategyBridge` 以�
 `--config` 指向目录时：目录本身有 `strategy.yaml` = 单组策略配置；目录本身没有、
 但直接子目录有 = 配置集。`backtest` 只接受单组，`run` 两者都接受。
 
-- `rebalance.top_k` ≤ universe 数；`bottom_k` 必须为 `0`；`weight_scheme` 仅 `equal`。
-- `params.top_k` 是横截面路径实际选股数（单标路径不使用），与 `rebalance.top_k`
+- `rebalance.top_k` ≤ universe 数；`bottom_k` ≤ universe 数（0 = 只做多）；`weight_scheme` 仅 `equal`。
+- `params.top_k`/`params.bottom_k` 是横截面路径实际选股数，与 `rebalance` 同名项
   保持同值，避免配置校验与实际选股不一致。
+- 多空预算：`bottom_k > 0` 时多头侧与空头侧各占 `risk.max_total_notional` 的一半，
+  每侧等权；`bottom_k = 0` 时多头独占全部预算。
+- 反手：同一标的从多头侧掉到空头侧时，模板在调仓轮发 `Close` + `Open`，由引擎
+  Phase 1/2 串行；引擎不支持同轮 `Adjust` 异号翻仓。
 - `params.rank_indicator` 必须与 `indicators` 中声明的键一致；否则所有候选因特征缺失
   被过滤，策略完全不交易。
 - N=1 配置可省略 `rebalance`；模板单标路径不依赖 `rebalance_due`。
@@ -215,13 +222,13 @@ SPI 单标路径（`ExchangeRunner`）走同一 port：`PortStrategyBridge` 以�
 - 策略 NAV 是策略总资金：paper/live 每个 slot 以完整总资金虚拟起账时，引擎汇总
   `current_nav` / `current_cash` 会扣除重复起账现金，`PortfolioContext.nav` 不虚高。
 
-## 7. 单体起步 → 加代币变多体
+## 7. 单体起步 → 加标的变多体
 
 1. **单标**：`universe` 写 1 个标的，省略 `rebalance`，运行
    `config/tpl_trend_crypto/strategy.yaml`。模板走单标路径。
-2. **加代币**：`universe` 加第二行（例如 `BNBUSDT`），补 `rebalance`
-   （`top_k` ≤ universe 数、与 `params.top_k` 同值），运行
-   `config/tpl_xsec_crypto/strategy.yaml`。同一份策略代码自动切横截面路径。
+2. **加标的**：`universe` 再加一行，补 `rebalance`
+   （`top_k`/`bottom_k` ≤ universe 数、与 `params` 同名项同值）；期货多空样例为
+   `config/tpl_xsec_futures/strategy.yaml`。同一份策略代码自动切横截面路径。
 3. 不需要改任何注册文件；同一份策略代码自动切横截面路径。
 
 ```bash
@@ -232,7 +239,7 @@ cargo run -p strategy-app -- backtest \
 
 # 横截面（同一模板，加了一行代币与 rebalance）
 cargo run -p strategy-app -- backtest \
-  --config config/tpl_xsec_crypto/strategy.yaml \
+  --config config/tpl_xsec_futures/strategy.yaml \
   --start 20260901 --end 20260915 --data-dir ./data/klines
 ```
 
@@ -240,19 +247,19 @@ cargo run -p strategy-app -- backtest \
 
 - 基类测试：`crates/strategies/tests/strategy_base.rs`，覆盖单标开仓/跳过、
   横截面 `rebalance_due`、排名、等权调仓、掉出 `top_k`、`max_total_notional` 预算。
-- 模板单测：`crates/strategies/src/template_xsec.rs` 的 `#[cfg(test)]` 模块，
-  覆盖单标无 `rebalance`、横截面 `rebalance_due`、特征缺失、调仓、`params` 校验。
+- 模板单测：`crates/strategies/src/template_xsec_ls.rs` 的 `#[cfg(test)]` 模块，
+  覆盖双端排名、趋势方向过滤、方向化止损、掉出 `Adjust{0}`、`Close`+`Open` 反手。
 - 注册集成测试：`crates/strategies/tests/registry.rs`（注册名 = `strategy_type()`，
   且每个策略都声明 1m）。
 - 配置装配测试：`crates/app/tests/strategy_config_guards.rs` 的
-  `template_xsec_sample_config_loads_and_instantiates` 与
-  `template_xsec_single_config_loads_without_rebalance`。
+  `template_xsec_ls_sample_config_loads_and_instantiates` 与
+  `futures_templates_load_and_instantiate`。
 - 端到端：`crates/app/tests/strategy_backtest_e2e.rs`、
   `strategy_live_mock_e2e.rs`；回测/paper 一致性由这两个用例端到端验收。
 
 ```bash
 cargo test -p strategy-strategies
-cargo test -p strategy-app --test strategy_config_guards template_xsec
+cargo test -p strategy-app --test strategy_config_guards template_xsec_ls
 cargo test -p strategy-app --test strategy_backtest_e2e
 ```
 
@@ -262,8 +269,11 @@ cargo test -p strategy-app --test strategy_backtest_e2e
 
 ## 9. 本期边界
 
-- `bottom_k` 必须为 `0`；空头侧未实现。
-- `weight_scheme` 仅支持 `equal`。
+- `bottom_k` 已支持双端排名；同一标的跨轮反向时靠 `Close`+`Open` 两段式完成，
+  引擎不支持同轮 `Adjust` 异号翻仓。
+- 模板逐 bar 检查持仓止损：多头 `low <= stop`、空头 `high >= stop` 时发
+  `Close{is_stop_loss:true}`；横截面运行时不自动读取 `Open.stop_price`。
+- `weight_scheme` 仅支持 `equal`；多空预算固定各占一半（`bottom_k>0` 时）。
 - 指标白名单固定：`adx/rsi/ema/sma/atr/macd`。
 - 单组单 exchange、单 account；`multi_instance` 模式拒启。
 - NAV 仍为 `local_mirror`，不冒充券商权益帧。

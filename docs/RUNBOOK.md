@@ -354,10 +354,10 @@ cargo run -p strategy-data --bin roll_build -- \
 
 ```bash
 # paper（本地撮合，无网关）
-cargo run -p strategy-app -- run --config config/tpl_xsec_crypto/strategy.yaml \
+cargo run -p strategy-app -- run --config config/tpl_xsec_futures/strategy.yaml \
   --mode paper_trading --data-dir ./data/klines --output-dir ./out
 # live（需 _global.yaml 配真实 services.trading；紧急停单用 submit_enabled: false）
-cargo run -p strategy-app -- run --config config/tpl_xsec_crypto/strategy.yaml --mode live
+cargo run -p strategy-app -- run --config config/tpl_xsec_futures/strategy.yaml --mode live
 ```
 
 ### 5.2 mock 演练（隔离 cwd；先 dry 再上 live）

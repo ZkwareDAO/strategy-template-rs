@@ -30,11 +30,11 @@ AI 生成策略时只实现用户明确说出的逻辑：不自行增加指标�
 | 策略 | 市场 | 形态 | 用途 |
 |---|---|---|---|
 | `template_trend` | crypto / 期货 | 单标逐标 | EMA 交叉 / 趋势过滤 + 百分比或 ATR 止损；同一代码跑 `BTCUSDT` 与 `CU` |
-| `template_xsec` | crypto / 期货 | N=1 ↔ N>1 | 参数化排名 + 等权 `Adjust`；N=1 自动退化为单标买入 |
+| `template_xsec_ls` | crypto / 期货 | N=1 ↔ N>1 | 多空横截面：前 `top_k` 做多、后 `bottom_k` 做空；N=1 按趋势方向单标 |
 
 选起点：
 - crypto / 期货单标 → `template_trend`
-- 需要排名/轮换（含期货组合）→ `template_xsec`
+- 需要多空排名/轮换（期货样例）→ `template_xsec_ls`
 - crypto 与期货的配置、合约、时段差异 → [CRYPTO_VS_FUTURES.md](CRYPTO_VS_FUTURES.md)
 
 ## AI 辅助开发流
@@ -54,13 +54,14 @@ AI 生成策略时只实现用户明确说出的逻辑：不自行增加指标�
    - 推荐：实现 `StrategyLogic`（`name/top_k/score/entry_allowed/stop`），用
      `common::StrategyBase` 包装；基类契约见 `common/mod.rs` 与
      `crates/strategies/tests/strategy_base.rs`。当前 2 个模板都直接实现 port，
-     最小可跑起点是 `template_xsec.rs`。
-   - 或用 `template_trend.rs` / `template_xsec.rs` 直接实现 port。
+     最小可跑起点是 `template_xsec_ls.rs`。注意 `StrategyBase` 当前只发多单；
+     需要 `bottom_k` 双端空头时直接实现 port。
+   - 或用 `template_trend.rs` / `template_xsec_ls.rs` 直接实现 port。
    - 期货：先读 [CRYPTO_VS_FUTURES.md](CRYPTO_VS_FUTURES.md)，再参考
-     `template_trend.rs` / `template_xsec.rs`。
+     `template_trend.rs` / `template_xsec_ls.rs`。
 2. 文件尾 `register_strategy!` 自注册——**无需修改任何其他文件**；
    `strategy_type()`、注册名、配置名三者必须一致。
 3. 建配置：
-   - 统一端口策略：`config/<group>/strategy.yaml`（样例 `config/tpl_xsec_crypto/strategy.yaml`）。
+   - 统一端口策略：`config/<group>/strategy.yaml`（样例 `config/tpl_xsec_futures/strategy.yaml`）。
    - 期货：`universe` 写 `{ symbol, exchange }`，合约参数写 `config/contracts.yaml`。
    - 旧单标路径：`config/<strategy>/<SYMBOL>.yaml`，目录模式按**文件名**认领标的。

@@ -1,7 +1,9 @@
-# template_trend 组基线（crypto 单标）
+# template_trend 组基线（crypto 多标，逐标的独立总仓）
 mode: paper_trading
 warmup_days: 30
-cash: 200.0
+# 每单名义 1000 USDT；leverage=5 → 保证金占用 200 USDT
+cash: 1000.0
+leverage: 5
 
 services:
   trading:

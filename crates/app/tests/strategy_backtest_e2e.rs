@@ -39,7 +39,7 @@ fn candles(n: usize, base: f64, step: f64) -> Vec<Candle> {
 
 fn symbol_spec(symbol: &str) -> strategy_app::config::SymbolSpec {
     strategy_app::config::SymbolSpec {
-        strategy: "template_xsec".into(),
+        strategy: "template_xsec_ls".into(),
         symbol: symbol.into(),
         timeframe: "1m".into(),
         cash: 200.0,
@@ -64,8 +64,8 @@ fn symbol_spec(symbol: &str) -> strategy_app::config::SymbolSpec {
 
 fn spec_two_symbols() -> StrategySpec {
     let config = strategy_engine::strategy::config::StrategyConfig {
-        strategy_type: "template_xsec".into(),
-        strategy_id: Some("template_xsec:default".into()),
+        strategy_type: "template_xsec_ls".into(),
+        strategy_id: Some("template_xsec_ls:default".into()),
         mode: strategy_engine::strategy::config::StrategyMode::CrossSectional,
         merge_positions: true,
         universe: vec![
@@ -97,8 +97,8 @@ fn spec_two_symbols() -> StrategySpec {
         params: None,
     };
     StrategySpec {
-        strategy_type: "template_xsec".into(),
-        strategy_id: "template_xsec:default".into(),
+        strategy_type: "template_xsec_ls".into(),
+        strategy_id: "template_xsec_ls:default".into(),
         config,
         instruments: vec![symbol_spec("BTCUSDT"), symbol_spec("ETHUSDT")],
         warmup_days: 0,
@@ -229,8 +229,8 @@ fn spec_with(
     params: Option<serde_json::Value>,
 ) -> StrategySpec {
     let mut cfg = strategy_engine::strategy::config::StrategyConfig {
-        strategy_type: "template_xsec".into(),
-        strategy_id: Some("template_xsec:default".into()),
+        strategy_type: "template_xsec_ls".into(),
+        strategy_id: Some("template_xsec_ls:default".into()),
         mode: strategy_engine::strategy::config::StrategyMode::CrossSectional,
         merge_positions: true,
         universe: universe
@@ -268,8 +268,8 @@ fn spec_with(
         cfg.rebalance = None;
     }
     StrategySpec {
-        strategy_type: "template_xsec".into(),
-        strategy_id: "template_xsec:default".into(),
+        strategy_type: "template_xsec_ls".into(),
+        strategy_id: "template_xsec_ls:default".into(),
         instruments: universe.iter().map(|u| symbol_spec(u)).collect(),
         config: cfg,
         warmup_days: 0,
@@ -486,8 +486,8 @@ fn entry_exit_scenario_with_sub_golden_exit_rule_leg() {
         .find(|f| f.signal_id.contains("_leg"))
         .expect("exit_rule 平仓 leg");
     // 黄金值：base = generate_sub_signal_id(..., at=t3(00:03), side=Short, ExitRule, 0)
-    // （strategy_type 改为 template_xsec 后的确定性哈希，同输入两次运行逐字节一致）
-    let golden_base = "sub_16d90164027dec8b";
+    // （strategy_type 改为 template_xsec_ls 后的确定性哈希，同输入两次运行逐字节一致）
+    let golden_base = "sub_772ee75b5263b4e3";
     assert_eq!(
         close.signal_id,
         format!("{golden_base}_leg0"),
@@ -554,7 +554,7 @@ fn warmup_insufficient_blocks_opens() {
 }
 
 #[test]
-fn template_xsec_example_runs_two_symbols_and_trades() {
+fn template_xsec_ls_example_runs_two_symbols_and_trades() {
     let mut inds = std::collections::BTreeMap::new();
     inds.insert(
         "macd".into(),
@@ -585,14 +585,14 @@ fn template_xsec_example_runs_two_symbols_and_trades() {
         cash: inst.cash,
         params: spec.config.params.as_ref(),
     };
-    let strategy = strategy_strategies::registry::create("template_xsec", &args).unwrap();
+    let strategy = strategy_strategies::registry::create("template_xsec_ls", &args).unwrap();
     let (summary, rows, daily) = run_scenario(tmp.path(), strategy, &spec, &[btc, eth]);
     assert!(
         summary.rejected_actions <= summary.actions,
         "示例策略动作应基本成功"
     );
     assert!(!summary.fills.is_empty(), "400 根后应出现轮换成交");
-    assert_eq!(rows[0].strategy_name, "template_xsec:default");
+    assert_eq!(rows[0].strategy_name, "template_xsec_ls:default");
     assert!(!daily.is_empty());
     assert!(
         summary.final_portfolio.rebalance_epoch >= 1,
@@ -605,5 +605,150 @@ fn template_xsec_example_runs_two_symbols_and_trades() {
             .any(|f| f.instrument.symbol == "BTCUSDT"
                 && matches!(f.offset, strategy_engine::core::trading::Offset::Open)),
         "400 根后应选中强势 BTC 开仓"
+    );
+}
+
+#[test]
+fn template_xsec_ls_opens_long_and_short_on_ranked_ends() {
+    let mut inds = std::collections::BTreeMap::new();
+    inds.insert(
+        "macd".into(),
+        strategy_engine::strategy::config::IndicatorCfg {
+            tf: "1m".into(),
+            params: std::collections::BTreeMap::from_iter([
+                ("fast".into(), serde_json::json!(3)),
+                ("slow".into(), serde_json::json!(5)),
+                ("signal".into(), serde_json::json!(2)),
+            ]),
+        },
+    );
+    let spec = spec_with(
+        &["BTCUSDT", "ETHUSDT"],
+        &["1m"],
+        inds,
+        Default::default(),
+        Some(serde_json::json!({ "top_k": 1, "bottom_k": 1 })),
+    );
+    // BTC 单边上涨、ETH 单边下跌：排名两端分别落多单与空单。
+    let btc = rising_candles(400, 100.0, 0.2);
+    let eth = rising_candles(400, 50.0, -0.2);
+    let tmp = tempfile::tempdir().unwrap();
+    let inst = &spec.instruments[0];
+    let args = strategy_strategies::registry::FactoryArgs {
+        symbol: &inst.symbol,
+        timeframe: &inst.timeframe,
+        cash: inst.cash,
+        params: spec.config.params.as_ref(),
+    };
+    let strategy = strategy_strategies::registry::create("template_xsec_ls", &args).unwrap();
+    let (summary, _, _) = run_scenario(tmp.path(), strategy, &spec, &[btc, eth]);
+    let open_long = summary.fills.iter().any(|f| {
+        f.instrument.symbol == "BTCUSDT"
+            && f.side == strategy_core::signal::Side::Long
+            && matches!(f.offset, strategy_engine::core::trading::Offset::Open)
+    });
+    let open_short = summary.fills.iter().any(|f| {
+        f.instrument.symbol == "ETHUSDT"
+            && f.side == strategy_core::signal::Side::Short
+            && matches!(f.offset, strategy_engine::core::trading::Offset::Open)
+    });
+    assert!(open_long, "强势标的应开多单: {:?}", summary.fills);
+    assert!(open_short, "弱势标的应开空单: {:?}", summary.fills);
+}
+
+/// 脚本策略：先开多，调仓轮再发「平多 + 开空」，验证引擎 Phase 1/2 串行。
+struct FlipOnce {
+    flipped: bool,
+}
+
+impl strategy_engine::strategy::port::CrossSectionalStrategyPort for FlipOnce {
+    fn strategy_type(&self) -> &str {
+        "flip_once"
+    }
+
+    fn on_cross_section_bars(
+        &mut self,
+        _newly: &[Timeframe],
+        snaps: &[strategy_engine::strategy::port::InstrumentSnapshot],
+        port: &strategy_engine::strategy::port::PortfolioContext,
+    ) -> Vec<strategy_engine::strategy::port::InstrumentAction> {
+        use strategy_engine::strategy::port::InstrumentAction;
+        let Some(btc) = snaps.iter().find(|s| s.instrument.symbol == "BTCUSDT") else {
+            return Vec::new();
+        };
+        let existing = port.sub_positions.iter().find(|p| {
+            p.instrument.symbol == "BTCUSDT"
+                && p.state != strategy_engine::strategy::model::SubPositionState::Closed
+        });
+        let price = btc.bar.close;
+        match existing {
+            None if !self.flipped => vec![InstrumentAction::Open {
+                instrument: btc.instrument.clone(),
+                side: strategy_core::signal::Side::Long,
+                price,
+                stop_price: price * 0.98,
+                atr: 0.0,
+                strength: 1.0,
+                reason: "flip_once: open long".into(),
+            }],
+            Some(_) if !self.flipped && port.rebalance_due => {
+                self.flipped = true;
+                vec![
+                    InstrumentAction::Close {
+                        instrument: btc.instrument.clone(),
+                        price,
+                        reason: "flip_once: close long".into(),
+                        is_stop_loss: false,
+                        strength: 1.0,
+                    },
+                    InstrumentAction::Open {
+                        instrument: btc.instrument.clone(),
+                        side: strategy_core::signal::Side::Short,
+                        price,
+                        stop_price: price * 1.02,
+                        atr: 0.0,
+                        strength: 1.0,
+                        reason: "flip_once: open short".into(),
+                    },
+                ]
+            }
+            _ => Vec::new(),
+        }
+    }
+}
+
+#[test]
+fn engine_flips_long_to_short_across_phase1_phase2() {
+    let spec = spec_with(
+        &["BTCUSDT", "ETHUSDT"],
+        &["1m"],
+        Default::default(),
+        Default::default(),
+        None,
+    );
+    let btc = rising_candles(300, 100.0, 0.1);
+    let eth = rising_candles(300, 50.0, 0.0);
+    let tmp = tempfile::tempdir().unwrap();
+    let (summary, _, _) = run_scenario(
+        tmp.path(),
+        Box::new(FlipOnce { flipped: false }),
+        &spec,
+        &[btc, eth],
+    );
+    let closed_long = summary.fills.iter().any(|f| {
+        f.instrument.symbol == "BTCUSDT"
+            && f.signal_id.contains("_leg")
+            && !matches!(f.offset, strategy_engine::core::trading::Offset::Open)
+    });
+    let opened_short = summary.fills.iter().any(|f| {
+        f.instrument.symbol == "BTCUSDT"
+            && f.side == strategy_core::signal::Side::Short
+            && matches!(f.offset, strategy_engine::core::trading::Offset::Open)
+    });
+    assert!(closed_long, "反手应先平多: {:?}", summary.fills);
+    assert!(
+        opened_short,
+        "平多落地后应在 Phase 2 开空: {:?}",
+        summary.fills
     );
 }
