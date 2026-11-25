@@ -1,5 +1,21 @@
 # Contributing — strategy-rs
 
+## 文档入库政策
+
+入库门槛 = **长期资产 ∧ 无敏感信息 ∧ 有同步机制（或显式标注"快照"）**，缺一即
+归档或出库：
+
+| 类别 | 处置 | 例 |
+|---|---|---|
+| 长期契约/规范 | 入库，随代码演进维护（`check_doc_refs.py` 门禁） | `README.md`、`docs/strategy/`、`AGENTS.md`、`RUNBOOK.md`、`CONTRIBUTING.md` |
+| 设计时快照 | 入库，头部加"快照声明 + `refcheck:coords=off`"，不再随代码更新 | `docs/design-package/`、`docs/design.md` |
+| 退役/过程产物 | 移入 `docs/archive/` 或出库 | `docs/archive/`（退役服务、历史计划、时点审查） |
+| 审查/性能分析报告 | **不入库**：结论转 issues + 修复 commit，原文档归内部库；`*_REVIEW_*.md`、`*_ANALYSIS_*.md` 已 gitignore | 安全审查、性能基线分析 |
+| 会话/本地态 | gitignore | `.claude/`、`.workbuddy/`、`logs/`、`_global.yaml`、`.env` |
+
+敏感信息红线：真实内网 IP/端点、密钥、漏洞利用路径不得出现在任何入库文档；
+示例一律用占位符（`ws://<host>/ws`、`127.0.0.1`、`REPLACE_WITH...`）。
+
 ## 开发环境
 
 - Rust（edition 2021），工具链以仓库根 `Cargo.toml` workspace 为准；无系统级依赖。

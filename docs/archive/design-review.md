@@ -1,5 +1,11 @@
 # strategy-template-rs 设计审查报告
 
+> ## 🗄️ 已归档（2026-11-25）：时点性过程产物，不再更新
+>
+> 本文为设计/执行时点的快照，结论已沉淀到对应 issues 与代码；现行规范见 `docs/strategy/`。
+
+<!-- refcheck:coords=off -->
+
 > 审查日期：2026-11-06
 > 版本：v1.0 — 并发 / 持久化 / 扩展性 / 解耦 / 设计模式全面审查
 > 审查范围：Store 存储层、Model 混合模式、ExchangeRunner 引擎、WS 连接管理、Workspace 分层

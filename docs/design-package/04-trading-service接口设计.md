@@ -1,5 +1,12 @@
 # 04 · trading-service 连接接口设计文档
 
+> ## ⚠️ 状态：设计时快照（2026-11-25 收口加注，不再随代码更新）
+>
+> 本包是设计阶段的需求/架构/接口快照，仅用于理解设计意图。策略清单、行号与行数均已过期：
+> 现行契约见 `docs/strategy/`，策略实现以 `crates/strategies/src/`（template_trend / template_xsec_ls）为准。
+
+<!-- refcheck:coords=off -->
+
 > 版本：v1.4（2026-11-10 晚：**代码落地后全篇复核**——kline 并入已在代码侧完成（commit `539a7d5`+`1766c58`），§2.1/§3/§6 按契约 v0.3 与源码实况订正：帧名实为 `kline_1m(_batch)`/`kline_history`（非 `kline`/`klines`/`subscribed`）、bar 为命名字段对象（只推定稿、无 `is_final`）、K线帧与订单同走 per 策略类型交易连接（无独立共享 K线连接）、`get_klines` 要求 `exchange`、HTTP 兼容路径代码已不存在、`services.trading` 无 `market` 字段；行号随代码增长重锚。前序 v1.3：kline-service 并入设计；v1.2：D1b/D2 后已删实现引用重锚 + v1.0 坐标失真订正）· 基于源码逆向核对（`文件:行` 为真实落点）
 > 视角：**strategy-template-rs（客户端）与 trading-service（服务端）的连接接口设计**。
 > 消息契约原始件：`contracts/trading-service.md`（**v0.3**，含 §8 K线章）；客户端可执行规格：

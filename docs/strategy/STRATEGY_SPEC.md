@@ -16,7 +16,7 @@
 | `extra_timeframes` | 否 | 其他订阅周期 |
 | `symbols` | 是 | 设计覆盖标的 |
 | `data_source` | 否 | K 线位置（**期货必需**）：`{ dir: <数据根> }` 或 `{ files: [<1m CSV 路径>] }`。crypto 可写下载命令/默认路径 |
-| `backtest` | 否 | `{ start: YYYYMMDD, end: YYYYMMDD, initial_cash: <number> }`；期货必须给初始权益 |
+| `backtest` | 否 | `{ start: YYYYMMDD, end: YYYYMMDD, initial_cash: <number> }`；期货必须给初始权益。`start`/`end` 支持两种写法：显式 `YYYYMMDD` 日期，或 `"auto"`（由自动化流程按相对今天的回测窗口计算——如 trading-dev skill 的 `BACKTEST_SHORT/MID/LONG_DAYS`，落地为具体日期后再执行回测）。直接手工跑回测时请写显式日期 |
 | `entry.description` | 是 | 一句话概述 |
 | `entry.conditions` | 是 | 可判定条件数组，每条对应代码里一个布尔量 |
 | `exit.stop_loss` | 是 | 硬止损规则；无止损须显式写依赖 `risk` 段 |

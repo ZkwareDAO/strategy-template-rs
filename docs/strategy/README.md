@@ -2,8 +2,9 @@
 
 从这里开始写你的第一个 CTA 策略。本目录是**策略开发契约层**：只写接口、不变量、
 验收方式，代码以 `crates/` 源码为准；面向人和 AI 共同消费。
-框架内部设计见 [`../design-package/`](../design-package/)（`../design.md` 已登记为
-历史文档，不再更新）。
+框架内部设计见 [`../design-package/`](../design-package/)——注意它是**设计时快照**
+（2026-11-25 加注），仅用于理解设计意图，策略清单与行号已过期；
+`../design.md` 等历史文档不再更新。
 
 模板仓库只保留 **2 个模板策略**，覆盖 crypto 单标/多周期、横截面、期货 1:1/1:N。
 其余实验策略已移除；新实验请从模板拷贝，不要把一次性策略长期塞回 `crates/strategies/src/`。
@@ -65,3 +66,18 @@ AI 生成策略时只实现用户明确说出的逻辑：不自行增加指标�
    - 统一端口策略：`config/<group>/strategy.yaml`（样例 `config/tpl_xsec_futures/strategy.yaml`）。
    - 期货：`universe` 写 `{ symbol, exchange }`，合约参数写 `config/contracts.yaml`。
    - 旧单标路径：`config/<strategy>/<SYMBOL>.yaml`，目录模式按**文件名**认领标的。
+
+## 由 trading-dev skill 驱动时的分工
+
+当开发流程由 `trading-dev` skill 编排（`/trading-dev new` 等）时，验收分两层，
+**叠加生效、互不替代**：
+
+| 层 | 负责方 | 判据 |
+|---|---|---|
+| 代码正确可跑 | 本目录 DoD（AI_WORKFLOW.md §6） | spec/测试/配置齐全，`cargo test --workspace` 全绿，回测与 spec 对照 |
+| 策略表现达标 | trading-dev skill（Phase 3） | 短/中/长三窗口复合验收（收益/回撤/交易次数）+ benchmark 输出 |
+
+注意：**「回测跑通」≠「验收通过」**。模板 DoD 只保证代码语义正确；表现层验收
+（默认 费后收益 ≥20%、最大回撤 ≤30%、交易次数 ≥10 笔）由 skill 的回测窗口与
+阈值变量判定，未达标进入 skill 的 loop 调参闭环。两层各自的产物（DoD 清单、
+benchmark.md/json）都要交付。

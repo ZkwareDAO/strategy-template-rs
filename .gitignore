@@ -31,3 +31,7 @@
 /test_out.txt
 /test_err.txt
 /deliverables/
+
+# 时点性审查/分析报告不入库（结论转 issues，原文档归内部库）
+/*_REVIEW_*.md
+/*_ANALYSIS_*.md

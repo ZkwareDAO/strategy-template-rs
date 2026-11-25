@@ -1,5 +1,11 @@
 # strategy-template-rs 项目设计文档
 
+> ## 🗄️ 已归档（2026-11-25）：时点性过程产物，不再更新
+>
+> 本文为设计/执行时点的快照，结论已沉淀到对应 issues 与代码；现行规范见 `docs/strategy/`。
+
+<!-- refcheck:coords=off -->
+
 > 修订日期：2026-11-06  
 > 版本：v0.2 — Store 扩展 + Model 层混合模式
 >
